@@ -15,17 +15,20 @@
 - [x] Paid status in both views
 - [x] Payroll hours, rate, and check amount
 - [x] Responsive mobile layout
+- [x] Weekly payroll CSV download
+- [x] Complete recovery backup download
+- [x] Permanent audit history for time, paid status, employees, and jobs
 
 ## Verification
 
 - [x] Generate and inspect database migration
 - [x] Test setup, PIN validation, employee editing, job creation, time entry, flags, resolutions, paid status, view switching, and week controls
 - [x] Verify refresh, sign-out, and sign-in persistence
-- [ ] Create first checkpoint deployment
-- [ ] Test checkpoint on iPhone
+- [x] Create first checkpoint deployment
+- [x] Test checkpoint on iPhone
 
 ## Later hardening
 
-- [ ] Add payroll history/report screen if wanted
+- [x] Add payroll history/report screen
 - [ ] Add printable weekly report if wanted
-- [ ] Confirm who should be allowed to open the deployed app
+- [x] Confirm who should be allowed to open the deployed app
