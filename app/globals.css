@@ -78,6 +78,14 @@ h2 { margin-bottom:0; font-size:1.9rem; }
 .avatar { display:grid; place-items:center; width:52px; height:52px; border-radius:50%; background:#dcebe2; color:var(--green); font-size:1.4rem; font-weight:900; }
 .pinForm input { font-size:1.7rem; text-align:center; letter-spacing:.3em; }
 .empty { text-align:center; padding:70px 20px; color:var(--muted); }
+.backupActions { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:18px; }
+.downloadButton { display:inline-flex; align-items:center; justify-content:center; text-decoration:none; }
+.historyList { display:grid; gap:9px; }
+.historyItem { display:flex; align-items:center; justify-content:space-between; gap:12px; background:var(--paper); border:1px solid var(--line); border-radius:14px; padding:15px 17px; }
+.historyItem>div { display:grid; gap:5px; }
+.historyItem span { color:var(--muted); font-size:.82rem; }
+.historyType { background:#e5eee9; color:var(--green)!important; border-radius:999px; padding:.35rem .6rem; text-transform:capitalize; white-space:nowrap; font-weight:800; }
+.compactEmpty { padding:35px 20px; }
 .spinner { width:36px; height:36px; border:4px solid #d4ddd7; border-top-color:var(--green); border-radius:50%; animation:spin 1s linear infinite; }
 .center { align-content:center; gap:12px; color:var(--muted); }
 @keyframes spin { to { transform:rotate(360deg); } }
@@ -95,6 +103,8 @@ h2 { margin-bottom:0; font-size:1.9rem; }
   .listItem { align-items:flex-start; flex-direction:column; }
   .listItem>div:last-child { width:100%; }
   .listItem button { flex:1; }
+  .backupActions { display:grid; }
+  .historyItem { align-items:flex-start; }
 }
 @media (max-width:430px) {
   .personGrid { grid-template-columns:1fr; }
