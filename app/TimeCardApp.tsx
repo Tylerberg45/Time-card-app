@@ -10,6 +10,7 @@ type Data = {
   admins?: Person[]; employees?: Person[]; user?: Person & { role: "admin" | "employee" };
   weekStart?: string; weekEnd?: string; jobs?: Job[]; target?: Person | null; entries?: Entry[]; paid?: boolean;
 };
+type AuditItem = { id: number; actorName: string; action: string; targetType: string; targetId: string; summary: string; details: string; createdAt: string };
 
 const api = async (body?: Record<string, unknown>, query = "") => {
   const response = await fetch(`/api/timecard${query}`, body ? {
@@ -34,7 +35,7 @@ export default function TimeCardApp() {
   const [selectedLogin, setSelectedLogin] = useState<{ id: number; name: string; kind: string } | null>(null);
   const [week, setWeek] = useState("");
   const [employeeId, setEmployeeId] = useState(0);
-  const [tab, setTab] = useState<"time" | "people" | "jobs">("time");
+  const [tab, setTab] = useState<"time" | "people" | "jobs" | "history">("time");
 
   const load = useCallback(async (nextWeek?: string, nextEmployee?: number) => {
     try {
@@ -89,11 +90,13 @@ export default function TimeCardApp() {
         <button className={tab === "time" ? "active" : ""} onClick={() => setTab("time")}>Time cards</button>
         <button className={tab === "people" ? "active" : ""} onClick={() => setTab("people")}>Employees</button>
         <button className={tab === "jobs" ? "active" : ""} onClick={() => setTab("jobs")}>Jobs</button>
+        <button className={tab === "history" ? "active" : ""} onClick={() => setTab("history")}>History & backup</button>
       </nav>}
       {error && <div className="alert">{error}</div>}
 
       {tab === "people" && isAdmin ? <People people={data.employees ?? []} busy={busy} act={act} /> :
        tab === "jobs" && isAdmin ? <Jobs jobs={data.jobs ?? []} busy={busy} act={act} /> :
+       tab === "history" && isAdmin ? <History week={week} employeeId={employeeId} /> :
        <section>
         <div className="controls">
           {isAdmin && <label>Employee<select value={employeeId} onChange={(event) => changeEmployee(Number(event.target.value))}>
@@ -113,6 +116,31 @@ export default function TimeCardApp() {
       </section>}
     </main>
   );
+}
+
+function History({ week, employeeId }: { week: string; employeeId: number }) {
+  const [items, setItems] = useState<AuditItem[]>([]);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    api(undefined, "?history=1").then((result) => setItems(result.history ?? [])).catch((cause) => setError(cause instanceof Error ? cause.message : "Could not load history."));
+  }, []);
+  const when = (value: string) => new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+  return <section>
+    <div className="sectionHead">
+      <div><span className="eyebrow">Records</span><h2>History & backup</h2><p className="sectionHint">The activity log records changes made from this point forward. Download a weekly payroll CSV or a complete recovery backup and save it somewhere safe.</p></div>
+    </div>
+    <div className="backupActions">
+      <a className="primary downloadButton" href={`/api/timecard?download=csv&week=${encodeURIComponent(week)}&employeeId=${employeeId}`}>Download selected week CSV</a>
+      <a className="secondary downloadButton" href="/api/timecard?download=backup">Download complete backup</a>
+    </div>
+    {error && <div className="alert">{error}</div>}
+    <div className="historyList">
+      {items.length ? items.map((item) => <article className="historyItem" key={item.id}>
+        <div><strong>{item.summary}</strong><span>{item.actorName} · {when(item.createdAt)}</span></div>
+        <span className="historyType">{item.targetType.replaceAll("_", " ")}</span>
+      </article>) : <div className="empty compactEmpty"><p>No changes have been recorded yet.</p></div>}
+    </div>
+  </section>;
 }
 
 function Setup({ busy, error, onSubmit }: { busy: boolean; error: string; onSubmit: (name: string, pin: string) => void }) {
