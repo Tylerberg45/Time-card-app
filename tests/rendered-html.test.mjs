@@ -41,3 +41,28 @@ test("renders development preview metadata", async () => {
   assert.match(html, appleTouchIcon);
   assert.match(html, webAppManifest);
 });
+
+test("exposes a no-cache build identifier for automatic updates", async () => {
+  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+  workerUrl.searchParams.set("version-test", `${process.pid}-${Date.now()}`);
+  const { default: worker } = await import(workerUrl.href);
+
+  const response = await worker.fetch(
+    new Request("http://localhost/api/timecard?version=1"),
+    {
+      ASSETS: {
+        fetch: async () => new Response("Not found", { status: 404 }),
+      },
+    },
+    {
+      waitUntil() {},
+      passThroughOnException() {},
+    },
+  );
+
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("cache-control") ?? "", /no-store/i);
+  const result = await response.json();
+  assert.equal(typeof result.buildId, "string");
+  assert.ok(result.buildId.length > 0);
+});

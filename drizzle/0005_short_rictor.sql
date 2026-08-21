@@ -1,0 +1,1 @@
+ALTER TABLE `time_off_requests` ADD `reminder_sent_at` text;
