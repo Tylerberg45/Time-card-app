@@ -347,7 +347,8 @@ function TimeOff({ data, busy, act }: { data: Data; busy: boolean; act: (body: R
     });
   }, [month]);
   const pending = requests.filter((item) => item.status === "pending");
-  const monthItems = requests.filter((item) => item.endDate >= `${month}-01` && item.startDate <= `${month}-31` && (item.status === "approved" || item.status === "pending"));
+  const calendarRequests = requests.filter((item) => item.status === "approved" || (isAdmin && item.status === "pending"));
+  const monthItems = calendarRequests.filter((item) => item.endDate >= `${month}-01` && item.startDate <= `${month}-31`);
   const ownRequests = requests.filter((item) => item.userId === data.user?.id);
 
   const update = async (body: Record<string, unknown>, success: string) => {
@@ -360,7 +361,7 @@ function TimeOff({ data, busy, act }: { data: Data; busy: boolean; act: (body: R
 
   return <section>
     <div className="sectionHead timeOffHead">
-      <div><span className="eyebrow">Team availability</span><h2>Time off</h2><p className="sectionHint">{isAdmin ? "Review requests and see who will be out before planning the workweek." : "Request a day or date range, then check the calendar for approval."}</p></div>
+      <div><span className="eyebrow">Team availability</span><h2>Time off</h2><p className="sectionHint">{isAdmin ? "Review requests and see who will be out before planning the workweek." : "The calendar shows approved team time off. Your requests stay below until Corbin decides."}</p></div>
     </div>
     {error && <div className="alert">{error}</div>}
     {message && <div className="successMessage timeOffMessage">{message}</div>}
@@ -394,19 +395,19 @@ function TimeOff({ data, busy, act }: { data: Data; busy: boolean; act: (body: R
       {loading ? <div className="calendarLoading"><div className="spinner" /><span>Loading calendar…</span></div> : <>
         <div className="calendarWeekdays">{["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => <span key={day}>{day}</span>)}</div>
         <div className="monthGrid">{calendarDays.map((date) => {
-          const events = requests.filter((item) => (item.status === "approved" || item.status === "pending") && item.startDate <= date && item.endDate >= date);
+          const events = calendarRequests.filter((item) => item.startDate <= date && item.endDate >= date);
           return <div className={`calendarDay ${date.slice(0, 7) !== month ? "outsideMonth" : ""} ${date === today() ? "today" : ""}`} key={date}>
             <span className="dayNumber">{Number(date.slice(8))}</span>
             <div className="calendarEvents">{events.slice(0, 3).map((item) => <span className={`calendarEvent ${item.status}`} key={item.id} title={`${item.userName}: ${item.status}`}>{item.userName}</span>)}{events.length > 3 && <span className="moreEvents">+{events.length - 3}</span>}</div>
           </div>;
         })}</div>
       </>}
-      <div className="calendarLegend"><span><i className="legendApproved" />Approved</span><span><i className="legendPending" />Pending</span></div>
+      <div className="calendarLegend"><span><i className="legendApproved" />Approved</span>{isAdmin && <span><i className="legendPending" />Pending</span>}</div>
     </div>
 
     <div className="agendaSection">
       <div><span className="eyebrow">At a glance</span><h3>{isAdmin ? "This month's time off" : "Team time off"}</h3></div>
-      <div className="agendaList">{monthItems.length ? monthItems.map((item) => <article className="agendaItem" key={item.id}><div><strong>{item.userName}</strong><span>{dateRangeLabel(item.startDate, item.endDate)}</span></div><Status status={item.status} /></article>) : <div className="empty compactEmpty"><p>No time off on this month’s calendar.</p></div>}</div>
+      <div className="agendaList">{monthItems.length ? monthItems.map((item) => <article className="agendaItem" key={item.id}><div><strong>{item.userName}</strong><span>{dateRangeLabel(item.startDate, item.endDate)}</span></div><Status status={item.status} /></article>) : <div className="empty compactEmpty"><p>{isAdmin ? "No time off on this month’s calendar." : "No approved team time off this month."}</p></div>}</div>
     </div>
 
     {!isAdmin && <div className="agendaSection">

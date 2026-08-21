@@ -89,3 +89,11 @@ test("notifies employees when a time-off request is reviewed", async () => {
   assert.match(source, /Time-off request denied/);
   assert.match(source, /employeePushSent/);
 });
+
+test("shows employees only approved team time off", async () => {
+  const source = await readFile(new URL("../app/TimeCardApp.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /item\.status === "approved" \|\| \(isAdmin && item\.status === "pending"\)/);
+  assert.match(source, /No approved team time off this month/);
+  assert.match(source, /isAdmin && <span><i className="legendPending"/);
+});
