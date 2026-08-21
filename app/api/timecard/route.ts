@@ -231,7 +231,7 @@ async function dashboard(user: SessionUser, weekValue?: unknown, selectedId?: un
     checkNumber: pay?.checkNumber ?? "",
     pendingTimeOffCount: Number(pending?.count ?? 0),
     syncToken: await latestSyncToken(),
-    push: user.role === "admin" && push.appId
+    push: push.appId
       ? { configured: true, sendingConfigured: Boolean(push.apiKey), appId: push.appId, safariWebId: push.safariWebId, externalId: `timecard-user-${user.id}` }
       : { configured: false },
   };
@@ -541,8 +541,15 @@ export async function POST(request: Request) {
       await database().prepare(
         `UPDATE time_off_requests SET status = ?, reviewed_by = ?, review_note = ?, reviewed_at = ?, updated_at = ?, reminder_sent_at = NULL WHERE id = ?`,
       ).bind(decision, user.id, reviewNote, now, now, id).run();
-      await audit(user, decision === "approved" ? "approve" : "deny", "time_off", id, `${decision === "approved" ? "Approved" : "Denied"} ${before.userName}'s time off for ${dateRangeLabel(before.startDate, before.endDate)}`, { before, reviewNote, reminderQueued });
-      return json({ ok: true, reminderQueued });
+      const range = dateRangeLabel(before.startDate, before.endDate);
+      const employeePush = await sendPush(
+        [before.userId],
+        decision === "approved" ? "Time off approved" : "Time-off request denied",
+        decision === "approved" ? `Your time off for ${range} was approved.` : `Your time-off request for ${range} was denied.`,
+        new URL("/?tab=timeoff", request.url).toString(),
+      );
+      await audit(user, decision === "approved" ? "approve" : "deny", "time_off", id, `${decision === "approved" ? "Approved" : "Denied"} ${before.userName}'s time off for ${range}`, { before, reviewNote, reminderQueued, employeePushSent: employeePush.sent });
+      return json({ ok: true, reminderQueued, employeePushSent: employeePush.sent });
     }
 
     if (action === "saveEntry") {

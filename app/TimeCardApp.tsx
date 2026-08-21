@@ -80,15 +80,16 @@ const shiftMonth = (value: string, amount: number) => {
 
 // Change this version and update the items whenever a user-facing release ships.
 const RELEASE_NOTES = {
-  version: "2026.08.21",
+  version: "2026.08.21.2",
   date: "August 21, 2026",
   items: [
-    { title: "Calendar-style time cards", detail: "Tap a day, enter or edit time, save it, and see the hours right in the calendar." },
-    { title: "Time-off calendar", detail: "Request days off in the app, see their status, and let Corbin approve or deny requests." },
-    { title: "Pay reports", detail: "Corbin can create year-to-date or custom-date pay records, print or share them, and optionally include check numbers." },
-    { title: "More accurate pay history", detail: "Reports use the hourly rate that was in effect on each work date, even after a raise." },
-    { title: "Automatic updates", detail: "Saved changes now appear automatically, and future app releases refresh without everyone closing the app." },
-    { title: "Phone notification support", detail: "The app is ready to notify Corbin about time-off requests and reminders once push delivery is enabled." },
+    { audience: "all", title: "Calendar-style time cards", detail: "Tap a day, enter or edit time, save it, and see the hours right in the calendar." },
+    { audience: "all", title: "Time-off calendar", detail: "Request days off in the app, see their status, and let Corbin approve or deny requests." },
+    { audience: "admin", title: "Pay reports", detail: "Create year-to-date or custom-date pay records, print or share them, and optionally include check numbers." },
+    { audience: "admin", title: "More accurate pay history", detail: "Reports use the hourly rate that was in effect on each work date, even after a raise." },
+    { audience: "all", title: "Automatic updates", detail: "Saved changes now appear automatically, and future app releases refresh without everyone closing the app." },
+    { audience: "admin", title: "Phone notification support", detail: "Get alerts for new time-off requests plus reminders before an employee is off." },
+    { audience: "employee", title: "Employee approval alerts", detail: "Turn on phone alerts to hear immediately when Corbin approves or denies requested time off." },
   ],
 };
 
@@ -260,10 +261,10 @@ export default function TimeCardApp() {
         <section className="whatsNewCard" role="dialog" aria-modal="true" aria-labelledby="whats-new-title">
           <div className="whatsNewHead">
             <div className="whatsNewIcon" aria-hidden="true">✦</div>
-            <div><span className="eyebrow">New in HazenTime</span><h2 id="whats-new-title">Here&apos;s what changed</h2><p>{RELEASE_NOTES.date}</p></div>
+            <div><span className="eyebrow">New in HazenTime</span><h2 id="whats-new-title">Here&apos;s what&apos;s new for you</h2><p>{RELEASE_NOTES.date}</p></div>
           </div>
           <div className="whatsNewList">
-            {RELEASE_NOTES.items.map((item) => <article key={item.title}>
+            {RELEASE_NOTES.items.filter((item) => item.audience === "all" || item.audience === data.user?.role).map((item) => <article key={item.title}>
               <span aria-hidden="true">✓</span>
               <div><h3>{item.title}</h3><p>{item.detail}</p></div>
             </article>)}
@@ -364,7 +365,7 @@ function TimeOff({ data, busy, act }: { data: Data; busy: boolean; act: (body: R
     {error && <div className="alert">{error}</div>}
     {message && <div className="successMessage timeOffMessage">{message}</div>}
 
-    {isAdmin && <PhonePush push={data.push} />}
+    <PhonePush push={data.push} role={isAdmin ? "admin" : "employee"} />
 
     {isAdmin && <div className="requestSection">
       <div className="requestTitle"><div><span className="eyebrow">Needs a decision</span><h3>Pending requests</h3></div><span className="countBubble">{pending.length}</span></div>
@@ -419,7 +420,7 @@ function Status({ status }: { status: TimeOffRequest["status"] }) {
   return <span className={`status status-${status}`}>{status.charAt(0).toUpperCase() + status.slice(1)}</span>;
 }
 
-function PhonePush({ push }: { push?: Data["push"] }) {
+function PhonePush({ push, role }: { push?: Data["push"]; role: "admin" | "employee" }) {
   const [enabled, setEnabled] = useState(false);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
@@ -453,9 +454,17 @@ function PhonePush({ push }: { push?: Data["push"] }) {
     return () => window.clearTimeout(timer);
   }, [configure]);
 
-  if (!push?.configured) return <aside className="pushCard pushOffline"><div className="pushIcon" aria-hidden="true">↗</div><div><strong>Phone alerts are ready to connect</strong><p>The calendar works now. Add a free OneSignal App ID and API key to turn on Corbin’s iPhone alerts and day-before reminders.</p></div></aside>;
+  if (!push?.configured) return <aside className="pushCard pushOffline"><div className="pushIcon" aria-hidden="true">↗</div><div><strong>Phone alerts are ready to connect</strong><p>{role === "admin" ? "The calendar works now. Connect OneSignal to turn on request alerts and day-before reminders." : "Time-off approval alerts will be available after OneSignal is connected."}</p></div></aside>;
   const fullyConnected = enabled && push.sendingConfigured;
-  return <aside className="pushCard"><div className="pushIcon" aria-hidden="true">●</div><div><strong>{fullyConnected ? "Phone alerts are on" : enabled ? "Phone subscription is on" : "Enable Corbin’s phone alerts"}</strong><p>{fullyConnected ? "New requests and day-before reminders can appear on this phone." : enabled ? "The phone is subscribed. Add the OneSignal API key to start sending alerts." : "On iPhone, open the installed Home Screen app and allow notifications."}</p>{error && <span className="pushError">{error}</span>}</div>{!enabled && <button className="primary compact" disabled={working} onClick={() => configure(true)}>{working ? "Connecting…" : "Enable alerts"}</button>}</aside>;
+  const title = fullyConnected
+    ? role === "admin" ? "Phone alerts are on" : "Time-off alerts are on"
+    : enabled ? "Phone subscription is on"
+    : role === "admin" ? "Enable Corbin’s phone alerts" : "Enable time-off alerts";
+  const description = fullyConnected
+    ? role === "admin" ? "New requests and day-before reminders can appear on this phone." : "Approvals and denials can appear on this phone as soon as Corbin responds."
+    : enabled ? "The phone is subscribed. Notification sending still needs to be connected."
+    : "On iPhone, open the installed Home Screen app and allow notifications.";
+  return <aside className="pushCard"><div className="pushIcon" aria-hidden="true">●</div><div><strong>{title}</strong><p>{description}</p>{error && <span className="pushError">{error}</span>}</div>{!enabled && <button className="primary compact" disabled={working} onClick={() => configure(true)}>{working ? "Connecting…" : "Enable alerts"}</button>}</aside>;
 }
 
 function PayWeekStatus({ isAdmin, paid, checkNumber, userId, weekStart, busy, act }: { isAdmin: boolean; paid: boolean; checkNumber: string; userId: number; weekStart: string; busy: boolean; act: (body: Record<string, unknown>) => Promise<boolean> }) {
