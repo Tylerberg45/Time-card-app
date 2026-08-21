@@ -76,8 +76,9 @@ test("ships one-time release notes for the latest user-facing changes", async ()
   assert.match(source, /Time-off calendar/);
   assert.match(source, /Pay reports/);
   assert.match(source, /Automatic updates/);
-  assert.match(source, /Phone notification support/);
-  assert.match(source, /Employee approval alerts/);
+  assert.match(source, /Push notifications/);
+  assert.match(source, /Time-off push notifications/);
+  assert.match(source, /Enable push notifications/);
   assert.match(source, /item\.audience === data\.user\?\.role/);
 });
 
