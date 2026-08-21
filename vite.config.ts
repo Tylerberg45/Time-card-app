@@ -14,6 +14,7 @@ const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 const localBindingConfig = {
   main: "./worker/index.ts",
   compatibility_flags: ["nodejs_compat"],
+  triggers: { crons: ["0 * * * *"] },
   d1_databases: d1
     ? [
         {
@@ -44,6 +45,11 @@ export default defineConfig(async () => {
   const { cloudflare } = await import("@cloudflare/vite-plugin");
 
   return {
+    define: {
+      __TIME_CARD_BUILD_ID__: JSON.stringify(
+        process.env.GITHUB_SHA ?? process.env.CF_PAGES_COMMIT_SHA ?? `${Date.now()}`,
+      ),
+    },
     server: {
       host: "0.0.0.0",
       allowedHosts: ["terminal.local"],

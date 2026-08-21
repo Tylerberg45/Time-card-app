@@ -11,6 +11,18 @@ export const users = sqliteTable("users", {
   createdAt: text("created_at").notNull(),
 });
 
+export const employeePayRates = sqliteTable(
+  "employee_pay_rates",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    rate: real("rate").notNull().default(0),
+    effectiveFrom: text("effective_from").notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (table) => [uniqueIndex("employee_pay_rate_user_date").on(table.userId, table.effectiveFrom)],
+);
+
 export const jobs = sqliteTable("jobs", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull(),
@@ -43,6 +55,7 @@ export const payWeeks = sqliteTable(
     userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
     weekStart: text("week_start").notNull(),
     paid: integer("paid", { mode: "boolean" }).notNull().default(false),
+    checkNumber: text("check_number").notNull().default(""),
     updatedAt: text("updated_at").notNull(),
   },
   (table) => [uniqueIndex("pay_week_user_start").on(table.userId, table.weekStart)],
@@ -68,4 +81,27 @@ export const auditLog = sqliteTable(
     createdAt: text("created_at").notNull(),
   },
   (table) => [index("audit_log_created_at").on(table.createdAt)],
+);
+
+export const timeOffRequests = sqliteTable(
+  "time_off_requests",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    startDate: text("start_date").notNull(),
+    endDate: text("end_date").notNull(),
+    note: text("note").notNull().default(""),
+    status: text("status", { enum: ["pending", "approved", "denied", "cancelled"] }).notNull().default("pending"),
+    reviewedBy: integer("reviewed_by").references(() => users.id, { onDelete: "set null" }),
+    reviewNote: text("review_note").notNull().default(""),
+    requestedAt: text("requested_at").notNull(),
+    reviewedAt: text("reviewed_at"),
+    updatedAt: text("updated_at").notNull(),
+    reminderNotificationId: text("reminder_notification_id"),
+    reminderSentAt: text("reminder_sent_at"),
+  },
+  (table) => [
+    index("time_off_user_dates").on(table.userId, table.startDate, table.endDate),
+    index("time_off_status_start").on(table.status, table.startDate),
+  ],
 );

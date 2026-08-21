@@ -1,0 +1,1 @@
+ALTER TABLE `pay_weeks` ADD `check_number` text DEFAULT '' NOT NULL;

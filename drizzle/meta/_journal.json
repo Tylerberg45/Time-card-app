@@ -22,6 +22,41 @@
       "when": 1785414000766,
       "tag": "0002_thick_hardball",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1786656004060,
+      "tag": "0003_reset-corbin-pin",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1787313537738,
+      "tag": "0004_special_rattler",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1787313762926,
+      "tag": "0005_short_rictor",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1787320427944,
+      "tag": "0006_small_sunspot",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1787321055540,
+      "tag": "0007_cynical_sleeper",
+      "breakpoints": true
     }
   ]
 }

@@ -1,7 +1,7 @@
 {
   "name": "Hazen Time Card",
   "short_name": "Time Card",
-  "description": "Weekly employee time cards and payroll review.",
+  "description": "Employee time cards, payroll review, and time-off calendar.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
