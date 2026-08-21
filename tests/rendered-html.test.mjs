@@ -77,4 +77,14 @@ test("ships one-time release notes for the latest user-facing changes", async ()
   assert.match(source, /Pay reports/);
   assert.match(source, /Automatic updates/);
   assert.match(source, /Phone notification support/);
+  assert.match(source, /Employee approval alerts/);
+  assert.match(source, /item\.audience === data\.user\?\.role/);
+});
+
+test("notifies employees when a time-off request is reviewed", async () => {
+  const source = await readFile(new URL("../app/api/timecard/route.ts", import.meta.url), "utf8");
+
+  assert.match(source, /Time off approved/);
+  assert.match(source, /Time-off request denied/);
+  assert.match(source, /employeePushSent/);
 });
