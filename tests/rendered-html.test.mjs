@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const developmentPreviewMeta =
@@ -65,4 +66,15 @@ test("exposes a no-cache build identifier for automatic updates", async () => {
   const result = await response.json();
   assert.equal(typeof result.buildId, "string");
   assert.ok(result.buildId.length > 0);
+});
+
+test("ships one-time release notes for the latest user-facing changes", async () => {
+  const source = await readFile(new URL("../app/TimeCardApp.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /hazentime-whats-new:/);
+  assert.match(source, /Calendar-style time cards/);
+  assert.match(source, /Time-off calendar/);
+  assert.match(source, /Pay reports/);
+  assert.match(source, /Automatic updates/);
+  assert.match(source, /Phone notification support/);
 });

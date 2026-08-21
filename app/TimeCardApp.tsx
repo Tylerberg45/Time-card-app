@@ -78,6 +78,20 @@ const shiftMonth = (value: string, amount: number) => {
   const date = new Date(`${value}-01T12:00:00Z`); date.setUTCMonth(date.getUTCMonth() + amount); return iso(date).slice(0, 7);
 };
 
+// Change this version and update the items whenever a user-facing release ships.
+const RELEASE_NOTES = {
+  version: "2026.08.21",
+  date: "August 21, 2026",
+  items: [
+    { title: "Calendar-style time cards", detail: "Tap a day, enter or edit time, save it, and see the hours right in the calendar." },
+    { title: "Time-off calendar", detail: "Request days off in the app, see their status, and let Corbin approve or deny requests." },
+    { title: "Pay reports", detail: "Corbin can create year-to-date or custom-date pay records, print or share them, and optionally include check numbers." },
+    { title: "More accurate pay history", detail: "Reports use the hourly rate that was in effect on each work date, even after a raise." },
+    { title: "Automatic updates", detail: "Saved changes now appear automatically, and future app releases refresh without everyone closing the app." },
+    { title: "Phone notification support", detail: "The app is ready to notify Corbin about time-off requests and reminders once push delivery is enabled." },
+  ],
+};
+
 export default function TimeCardApp() {
   const [data, setData] = useState<Data | null>(null);
   const [error, setError] = useState("");
@@ -86,6 +100,7 @@ export default function TimeCardApp() {
   const [week, setWeek] = useState("");
   const [employeeId, setEmployeeId] = useState(0);
   const [tab, setTab] = useState<"time" | "timeoff" | "people" | "jobs" | "reports" | "history" | "account">("time");
+  const [showWhatsNew, setShowWhatsNew] = useState(false);
   const dirtyRef = useRef(false);
   const syncTokenRef = useRef<string | null>(null);
   const clearDirty = useCallback(() => { dirtyRef.current = false; }, []);
@@ -179,6 +194,31 @@ export default function TimeCardApp() {
     return () => window.clearTimeout(timer);
   }, []);
 
+  useEffect(() => {
+    if (!data?.user?.id) {
+      const timer = window.setTimeout(() => setShowWhatsNew(false), 0);
+      return () => window.clearTimeout(timer);
+    }
+    let shouldShow = true;
+    try {
+      const seenVersion = window.localStorage.getItem(`hazentime-whats-new:${data.user.id}`);
+      shouldShow = seenVersion !== RELEASE_NOTES.version;
+    } catch {
+      // If storage is unavailable, show the notes for this visit.
+    }
+    const timer = window.setTimeout(() => setShowWhatsNew(shouldShow), 0);
+    return () => window.clearTimeout(timer);
+  }, [data?.user?.id]);
+
+  useEffect(() => {
+    if (!showWhatsNew) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setShowWhatsNew(false);
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [showWhatsNew]);
+
   const act = async (body: Record<string, unknown>, reload = true) => {
     setBusy(true); setError("");
     try { await api(body); dirtyRef.current = false; if (reload) await load(); return true; }
@@ -198,13 +238,39 @@ export default function TimeCardApp() {
   const changeWeek = (days: number) => { dirtyRef.current = false; void load(addDays(week, days), employeeId); };
   const changeEmployee = (id: number) => { dirtyRef.current = false; setEmployeeId(id); void load(week, id); };
   const changeTab = (nextTab: typeof tab) => { dirtyRef.current = false; setTab(nextTab); };
+  const dismissWhatsNew = () => {
+    try {
+      window.localStorage.setItem(`hazentime-whats-new:${data.user!.id}`, RELEASE_NOTES.version);
+    } catch {
+      // The popup can still be dismissed for this visit when storage is unavailable.
+    }
+    setShowWhatsNew(false);
+  };
 
   return (
     <main className="appShell">
       <header className="topbar">
         <div><span className="eyebrow">Hazen Construction</span><h1>Time Card</h1></div>
-        <button className="textButton" onClick={async () => { await act({ action: "logout" }, false); setSelectedLogin(null); await load(); }}>Sign out</button>
+        <div className="topbarActions">
+          <button className="textButton whatsNewButton" onClick={() => setShowWhatsNew(true)}>What&apos;s new</button>
+          <button className="textButton" onClick={async () => { await act({ action: "logout" }, false); setSelectedLogin(null); await load(); }}>Sign out</button>
+        </div>
       </header>
+      {showWhatsNew && <div className="whatsNewBackdrop" onClick={(event) => { if (event.target === event.currentTarget) dismissWhatsNew(); }}>
+        <section className="whatsNewCard" role="dialog" aria-modal="true" aria-labelledby="whats-new-title">
+          <div className="whatsNewHead">
+            <div className="whatsNewIcon" aria-hidden="true">✦</div>
+            <div><span className="eyebrow">New in HazenTime</span><h2 id="whats-new-title">Here&apos;s what changed</h2><p>{RELEASE_NOTES.date}</p></div>
+          </div>
+          <div className="whatsNewList">
+            {RELEASE_NOTES.items.map((item) => <article key={item.title}>
+              <span aria-hidden="true">✓</span>
+              <div><h3>{item.title}</h3><p>{item.detail}</p></div>
+            </article>)}
+          </div>
+          <button className="primary whatsNewDone" onClick={dismissWhatsNew}>Got it</button>
+        </section>
+      </div>}
       <nav className="tabs">
         <button className={tab === "time" ? "active" : ""} onClick={() => changeTab("time")}>Time cards</button>
         <button className={tab === "timeoff" ? "active" : ""} onClick={() => changeTab("timeoff")}>Time off{Boolean(data.pendingTimeOffCount) && <span className="tabBadge">{data.pendingTimeOffCount}</span>}</button>
