@@ -17,6 +17,8 @@ h1 { margin-bottom:0; font-size:clamp(1.8rem,4vw,2.8rem); letter-spacing:-.04em;
 h2 { margin-bottom:0; font-size:1.9rem; }
 .eyebrow { display:block; color:var(--green2); font-size:.72rem; font-weight:800; letter-spacing:.14em; text-transform:uppercase; margin-bottom:5px; }
 .textButton { border:0; background:transparent; color:var(--green); padding:.65rem; font-weight:800; }
+.topbarActions { display:flex; align-items:center; gap:2px; }
+.whatsNewButton { color:var(--muted); }
 .primary,.secondary,.danger { border:0; border-radius:10px; padding:.8rem 1rem; font-weight:800; }
 .primary { background:var(--green); color:#fff; }
 .primary:hover { background:var(--green2); }
@@ -28,6 +30,18 @@ h2 { margin-bottom:0; font-size:1.9rem; }
 .tabs .active { background:var(--green); color:white; }
 .tabBadge { display:inline-grid; place-items:center; min-width:20px; height:20px; margin-left:7px; padding:0 5px; border-radius:999px; background:#d08336; color:white; font-size:.7rem; }
 .alert { background:#fff0ed; border:1px solid #efc3bd; color:#7f3028; border-radius:11px; padding:.8rem 1rem; margin:14px 0; font-weight:700; }
+.whatsNewBackdrop { position:fixed; inset:0; z-index:150; display:grid; place-items:center; padding:20px; background:#101d1794; backdrop-filter:blur(3px); }
+.whatsNewCard { width:min(590px,100%); max-height:calc(100dvh - 40px); overflow:auto; padding:24px; border:1px solid #cbd6cf; border-radius:24px; background:var(--paper); box-shadow:0 24px 70px #0a151059; }
+.whatsNewHead { display:flex; align-items:flex-start; gap:15px; padding-bottom:19px; border-bottom:1px solid var(--line); }
+.whatsNewHead h2 { margin:0; font-size:1.7rem; }
+.whatsNewHead p { margin:5px 0 0; color:var(--muted); font-size:.82rem; }
+.whatsNewIcon { display:grid; place-items:center; flex:0 0 48px; width:48px; height:48px; border-radius:15px; background:var(--green); color:white; font-size:1.45rem; }
+.whatsNewList { display:grid; gap:2px; padding:14px 0 18px; }
+.whatsNewList article { display:flex; align-items:flex-start; gap:11px; padding:10px 4px; }
+.whatsNewList article>span { display:grid; place-items:center; flex:0 0 23px; width:23px; height:23px; margin-top:1px; border-radius:50%; background:#dcebe2; color:var(--green); font-size:.75rem; font-weight:900; }
+.whatsNewList h3 { margin:0 0 3px; font-size:.98rem; }
+.whatsNewList p { margin:0; color:var(--muted); font-size:.86rem; line-height:1.4; }
+.whatsNewDone { width:100%; }
 .controls { background:var(--paper); border:1px solid var(--line); border-radius:18px; padding:18px; }
 .controls label { min-width:230px; }
 .weekPicker { display:flex; align-items:center; gap:12px; }
@@ -206,6 +220,12 @@ h2 { margin-bottom:0; font-size:1.9rem; }
 @media (max-width:760px) {
   .appShell { padding:18px 12px 45px; }
   .topbar { padding:0 4px; }
+  .topbarActions { align-items:flex-end; flex-direction:column-reverse; gap:0; }
+  .topbarActions .textButton { padding:.3rem .45rem; }
+  .whatsNewBackdrop { align-items:end; padding:12px 0 0; }
+  .whatsNewCard { max-height:92dvh; padding:20px 17px calc(18px + env(safe-area-inset-bottom)); border-radius:24px 24px 0 0; }
+  .whatsNewHead h2 { font-size:1.45rem; }
+  .whatsNewIcon { flex-basis:43px; width:43px; height:43px; }
   .controls { align-items:stretch; flex-direction:column; }
   .controls label { min-width:0; }
   .weekPicker { justify-content:space-between; }
