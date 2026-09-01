@@ -57,6 +57,20 @@
       "when": 1787321055540,
       "tag": "0007_cynical_sleeper",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1787338249017,
+      "tag": "0008_shallow_emma_frost",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1788216728674,
+      "tag": "0009_vengeful_black_tarantula",
+      "breakpoints": true
     }
   ]
 }

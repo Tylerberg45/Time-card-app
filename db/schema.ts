@@ -8,6 +8,7 @@ export const users = sqliteTable("users", {
   pinHash: text("pin_hash").notNull(),
   pinSalt: text("pin_salt").notNull(),
   hourlyRate: real("hourly_rate").notNull().default(0),
+  active: integer("active", { mode: "boolean" }).notNull().default(true),
   createdAt: text("created_at").notNull(),
 });
 
@@ -55,6 +56,9 @@ export const payWeeks = sqliteTable(
     userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
     weekStart: text("week_start").notNull(),
     paid: integer("paid", { mode: "boolean" }).notNull().default(false),
+    received: integer("received", { mode: "boolean" }).notNull().default(false),
+    paymentDate: text("payment_date").notNull().default(""),
+    paymentMethod: text("payment_method").notNull().default(""),
     checkNumber: text("check_number").notNull().default(""),
     updatedAt: text("updated_at").notNull(),
   },
@@ -65,6 +69,14 @@ export const sessions = sqliteTable("sessions", {
   tokenHash: text("token_hash").primaryKey(),
   userId: integer("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
   expiresAt: text("expires_at").notNull(),
+});
+
+export const loginAttempts = sqliteTable("login_attempts", {
+  userId: integer("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
+  failedCount: integer("failed_count").notNull().default(0),
+  windowStartedAt: text("window_started_at").notNull(),
+  lockedUntil: text("locked_until").notNull().default(""),
+  updatedAt: text("updated_at").notNull(),
 });
 
 export const auditLog = sqliteTable(
@@ -103,5 +115,37 @@ export const timeOffRequests = sqliteTable(
   (table) => [
     index("time_off_user_dates").on(table.userId, table.startDate, table.endDate),
     index("time_off_status_start").on(table.status, table.startDate),
+  ],
+);
+
+export const jobMismatchReviews = sqliteTable(
+  "job_mismatch_reviews",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    fingerprint: text("fingerprint").notNull(),
+    userAId: integer("user_a_id").notNull().references(() => users.id),
+    userBId: integer("user_b_id").notNull().references(() => users.id),
+    jobAId: integer("job_a_id").notNull().references(() => jobs.id),
+    jobBId: integer("job_b_id").notNull().references(() => jobs.id),
+    startDate: text("start_date").notNull(),
+    endDate: text("end_date").notNull(),
+    dates: text("dates").notNull().default("[]"),
+    entryIdsA: text("entry_ids_a").notNull().default("[]"),
+    entryIdsB: text("entry_ids_b").notNull().default("[]"),
+    hoursA: real("hours_a").notNull().default(0),
+    hoursB: real("hours_b").notNull().default(0),
+    confidence: text("confidence", { enum: ["possible", "likely"] }).notNull().default("possible"),
+    status: text("status", { enum: ["pending", "corrected", "separate", "stale"] }).notNull().default("pending"),
+    reviewedBy: integer("reviewed_by").references(() => users.id, { onDelete: "set null" }),
+    reviewedAt: text("reviewed_at"),
+    selectedJobId: integer("selected_job_id").references(() => jobs.id),
+    notificationId: text("notification_id"),
+    notificationSentAt: text("notification_sent_at"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("job_mismatch_fingerprint").on(table.fingerprint),
+    index("job_mismatch_status_start").on(table.status, table.startDate),
   ],
 );

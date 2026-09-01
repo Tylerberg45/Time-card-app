@@ -1,6 +1,9 @@
+import { detectJobMismatches } from "../../job-mismatch-logic.mjs";
+
 type Payload = Record<string, unknown>;
 type SessionUser = { id: number; name: string; role: "admin" | "employee" };
 type PushResult = { sent: boolean; id?: string };
+type PushButton = { id: string; text: string; url: string };
 
 declare const __TIME_CARD_BUILD_ID__: string;
 
@@ -68,6 +71,7 @@ async function sendPush(
   title: string,
   message: string,
   url: string,
+  buttons: PushButton[] = [],
 ): Promise<PushResult> {
   const { appId, apiKey } = pushConfig();
   if (!appId || !apiKey || !userIds.length) return { sent: false };
@@ -85,6 +89,7 @@ async function sendPush(
         headings: { en: title },
         contents: { en: message },
         url,
+        ...(buttons.length ? { web_buttons: buttons.slice(0, 2) } : {}),
       }),
     });
     const result = await response.json() as { id?: string };
@@ -93,6 +98,114 @@ async function sendPush(
   } catch (error) {
     console.error("Push notification failed", error);
     return { sent: false };
+  }
+}
+
+async function refreshJobMismatchReviews(request: Request) {
+  const db = database();
+  const rows = (await db.prepare(
+    `SELECT t.id, t.user_id AS userId, u.name AS userName, t.job_id AS jobId, j.name AS jobName,
+       t.work_date AS workDate, t.hours
+     FROM time_entries t
+     JOIN users u ON u.id = t.user_id
+     JOIN jobs j ON j.id = t.job_id
+     WHERE u.role = 'employee' AND t.hours > 0
+     ORDER BY t.work_date, t.user_id, t.job_id`,
+  ).all()).results as Array<{
+    id: number; userId: number; userName: string; jobId: number; jobName: string; workDate: string; hours: number;
+  }>;
+  const detected = detectJobMismatches(rows);
+  const fingerprints = new Set(detected.map((item) => item.fingerprint));
+  const now = new Date().toISOString();
+
+  for (const review of detected) {
+    await db.prepare(
+      `INSERT OR IGNORE INTO job_mismatch_reviews
+       (fingerprint, user_a_id, user_b_id, job_a_id, job_b_id, start_date, end_date, dates, entry_ids_a, entry_ids_b,
+        hours_a, hours_b, confidence, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+    ).bind(
+      review.fingerprint,
+      review.userAId,
+      review.userBId,
+      review.jobAId,
+      review.jobBId,
+      review.startDate,
+      review.endDate,
+      JSON.stringify(review.dates),
+      JSON.stringify(review.entryIdsA),
+      JSON.stringify(review.entryIdsB),
+      review.hoursA,
+      review.hoursB,
+      review.confidence,
+      now,
+      now,
+    ).run();
+  }
+
+  const pending = (await db.prepare(
+    `SELECT id, fingerprint, notification_sent_at AS notificationSentAt FROM job_mismatch_reviews WHERE status = 'pending'`,
+  ).all()).results as Array<{ id: number; fingerprint: string; notificationSentAt: string | null }>;
+  for (const stored of pending) {
+    if (!fingerprints.has(stored.fingerprint)) {
+      await db.prepare(`UPDATE job_mismatch_reviews SET status = 'stale', updated_at = ? WHERE id = ? AND status = 'pending'`)
+        .bind(now, stored.id).run();
+    }
+  }
+
+  const byFingerprint = new Map(detected.map((item) => [item.fingerprint, item]));
+  const admins = (await db.prepare(`SELECT id FROM users WHERE role = 'admin' AND active = 1 ORDER BY id`).all()).results as Array<{ id: number }>;
+  const adminIds = admins.map((item) => Number(item.id));
+  for (const stored of pending) {
+    if (stored.notificationSentAt || !fingerprints.has(stored.fingerprint)) continue;
+    const review = byFingerprint.get(stored.fingerprint);
+    if (!review) continue;
+    const claimed = await db.prepare(
+      `UPDATE job_mismatch_reviews SET notification_sent_at = ?, updated_at = ? WHERE id = ? AND status = 'pending' AND notification_sent_at IS NULL`,
+    ).bind(now, now, stored.id).run();
+    if (!claimed.meta.changes) continue;
+    const range = dateRangeLabel(review.startDate, review.endDate);
+    const result = await sendPush(
+      adminIds,
+      "Possible job mismatch",
+      `${review.userAName} used ${review.jobAName} while ${review.userBName} used ${review.jobBName} for ${range}. Tap to review.`,
+      new URL(`/?tab=jobreviews&review=${stored.id}`, request.url).toString(),
+      [{ id: "review", text: "Review", url: new URL(`/?tab=jobreviews&review=${stored.id}`, request.url).toString() }],
+    );
+    if (result.sent) {
+      await db.prepare(`UPDATE job_mismatch_reviews SET notification_id = ?, updated_at = ? WHERE id = ?`)
+        .bind(result.id ?? "", now, stored.id).run();
+      await db.prepare(
+        `INSERT INTO audit_log (actor_id, actor_name, action, target_type, target_id, summary, details, created_at)
+         VALUES (NULL, 'HazenTime', 'detect', 'job_mismatch', ?, ?, ?, ?)`,
+      ).bind(
+        String(stored.id),
+        `Detected a possible job mismatch for ${range}`,
+        JSON.stringify({ fingerprint: review.fingerprint, userA: review.userAName, jobA: review.jobAName, userB: review.userBName, jobB: review.jobBName }),
+        now,
+      ).run();
+    } else {
+      await db.prepare(`UPDATE job_mismatch_reviews SET notification_sent_at = NULL, updated_at = ? WHERE id = ?`)
+        .bind(now, stored.id).run();
+    }
+  }
+}
+
+function parsedNumberArray(value: string) {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.map(Number).filter((item) => Number.isInteger(item) && item > 0) : [];
+  } catch {
+    return [];
+  }
+}
+
+function parsedStringArray(value: string) {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
   }
 }
 
@@ -111,19 +224,32 @@ async function pinHash(pin: string, salt: string) {
   return b64(new Uint8Array(bits));
 }
 
+function secureEqual(left: string, right: string) {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  return difference === 0;
+}
+
+function loginDelaySeconds(failedCount: number) {
+  if (failedCount < 5) return 0;
+  return Math.min(15 * 60, 60 * (2 ** Math.min(failedCount - 5, 4)));
+}
+
 async function ensureSchema() {
   const db = database();
   const statements = [
-    `CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, phone TEXT NOT NULL DEFAULT '', role TEXT NOT NULL, pin_hash TEXT NOT NULL, pin_salt TEXT NOT NULL, hourly_rate REAL NOT NULL DEFAULT 0, created_at TEXT NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, phone TEXT NOT NULL DEFAULT '', role TEXT NOT NULL, pin_hash TEXT NOT NULL, pin_salt TEXT NOT NULL, hourly_rate REAL NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS employee_pay_rates (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, rate REAL NOT NULL DEFAULT 0, effective_from TEXT NOT NULL, created_at TEXT NOT NULL)`,
     `CREATE UNIQUE INDEX IF NOT EXISTS employee_pay_rate_user_date ON employee_pay_rates(user_id, effective_from)`,
     `INSERT OR IGNORE INTO employee_pay_rates (user_id, rate, effective_from, created_at) SELECT id, hourly_rate, substr(created_at, 1, 10), created_at FROM users WHERE role = 'employee'`,
     `CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS time_entries (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, job_id INTEGER NOT NULL REFERENCES jobs(id), work_date TEXT NOT NULL, hours REAL NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT '', flagged INTEGER NOT NULL DEFAULT 0, flag_reason TEXT NOT NULL DEFAULT '', resolution TEXT NOT NULL DEFAULT '', resolved INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)`,
     `CREATE UNIQUE INDEX IF NOT EXISTS entry_user_job_date ON time_entries(user_id, job_id, work_date)`,
-    `CREATE TABLE IF NOT EXISTS pay_weeks (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, week_start TEXT NOT NULL, paid INTEGER NOT NULL DEFAULT 0, check_number TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS pay_weeks (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, week_start TEXT NOT NULL, paid INTEGER NOT NULL DEFAULT 0, received INTEGER NOT NULL DEFAULT 0, payment_date TEXT NOT NULL DEFAULT '', payment_method TEXT NOT NULL DEFAULT '', check_number TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL)`,
     `CREATE UNIQUE INDEX IF NOT EXISTS pay_week_user_start ON pay_weeks(user_id, week_start)`,
     `CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at TEXT NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS login_attempts (user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, failed_count INTEGER NOT NULL DEFAULT 0, window_started_at TEXT NOT NULL, locked_until TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL)`,
     `CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, actor_id INTEGER, actor_name TEXT NOT NULL, action TEXT NOT NULL, target_type TEXT NOT NULL, target_id TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL, details TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL)`,
     `CREATE INDEX IF NOT EXISTS audit_log_created_at ON audit_log(created_at DESC)`,
     `CREATE TABLE IF NOT EXISTS time_off_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, start_date TEXT NOT NULL, end_date TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', reviewed_by INTEGER REFERENCES users(id) ON DELETE SET NULL, review_note TEXT NOT NULL DEFAULT '', requested_at TEXT NOT NULL, reviewed_at TEXT, updated_at TEXT NOT NULL, reminder_notification_id TEXT, reminder_sent_at TEXT)`,
@@ -167,7 +293,7 @@ async function currentUser(request: Request): Promise<SessionUser | null> {
   const token = cookieToken(request);
   if (!token) return null;
   const row = await database().prepare(
-    `SELECT u.id, u.name, u.role FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ?`,
+    `SELECT u.id, u.name, u.role FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ? AND u.active = 1`,
   ).bind(await digest(token), new Date().toISOString()).first<SessionUser>();
   return row ?? null;
 }
@@ -191,17 +317,29 @@ async function dashboard(user: SessionUser, weekValue?: unknown, selectedId?: un
   const end = new Date(`${weekStart}T12:00:00Z`);
   end.setUTCDate(end.getUTCDate() + 6);
   const weekEnd = end.toISOString().slice(0, 10);
-  const jobs = (await database().prepare(`SELECT id, name FROM jobs WHERE active = 1 ORDER BY name`).all()).results;
+  const jobs = user.role === "admin"
+    ? (await database().prepare(`SELECT id, name, active FROM jobs ORDER BY active DESC, name`).all()).results
+    : (await database().prepare(
+        `SELECT id, name, active FROM jobs
+         WHERE active = 1 OR id IN (
+           SELECT job_id FROM time_entries WHERE user_id = ? AND work_date BETWEEN ? AND ?
+         )
+         ORDER BY active DESC, name`,
+      ).bind(user.id, weekStart, weekEnd).all()).results;
   const employees = user.role === "admin"
-    ? (await database().prepare(`SELECT id, name, phone, hourly_rate AS hourlyRate FROM users WHERE role = 'employee' ORDER BY name`).all()).results
+    ? (await database().prepare(`SELECT id, name, phone, hourly_rate AS hourlyRate FROM users WHERE role = 'employee' AND active = 1 ORDER BY name`).all()).results
+    : [];
+  const archivedEmployees = user.role === "admin"
+    ? (await database().prepare(`SELECT id, name, phone, hourly_rate AS hourlyRate FROM users WHERE role = 'employee' AND active = 0 ORDER BY name`).all()).results
     : [];
   const firstEmployeeId = user.role === "admin" && employees.length
     ? Number((employees[0] as { id: number }).id)
     : user.id;
   const targetId = user.role === "admin" && Number(selectedId) ? Number(selectedId) : firstEmployeeId;
   const target = await database().prepare(
-    `SELECT id, name, phone, hourly_rate AS hourlyRate FROM users WHERE id = ? AND role = 'employee'`,
-  ).bind(targetId).first();
+    `SELECT id, name, phone, hourly_rate AS hourlyRate FROM users
+     WHERE id = ? AND active = 1 AND (role = 'employee' OR id = ?)`,
+  ).bind(targetId, user.id).first();
   const entries = target
     ? (await database().prepare(
         `SELECT t.id, t.user_id AS userId, t.job_id AS jobId, t.work_date AS workDate, t.hours, t.note, t.flagged,
@@ -212,11 +350,14 @@ async function dashboard(user: SessionUser, weekValue?: unknown, selectedId?: un
       ).bind(targetId, weekStart, weekEnd).all()).results
     : [];
   const pay = target
-    ? await database().prepare(`SELECT paid, check_number AS checkNumber FROM pay_weeks WHERE user_id = ? AND week_start = ?`).bind(targetId, weekStart).first<{ paid: number; checkNumber: string }>()
+    ? await database().prepare(`SELECT paid, received, payment_date AS paymentDate, payment_method AS paymentMethod, check_number AS checkNumber FROM pay_weeks WHERE user_id = ? AND week_start = ?`).bind(targetId, weekStart).first<{ paid: number; received: number; paymentDate: string; paymentMethod: string; checkNumber: string }>()
     : null;
   const pending = user.role === "admin"
     ? await database().prepare(`SELECT COUNT(*) AS count FROM time_off_requests WHERE status = 'pending'`).first<{ count: number }>()
     : await database().prepare(`SELECT COUNT(*) AS count FROM time_off_requests WHERE user_id = ? AND status = 'pending'`).bind(user.id).first<{ count: number }>();
+  const pendingJobReviews = user.role === "admin"
+    ? await database().prepare(`SELECT COUNT(*) AS count FROM job_mismatch_reviews WHERE status = 'pending'`).first<{ count: number }>()
+    : null;
   const push = pushConfig();
   return {
     configured: true,
@@ -225,11 +366,16 @@ async function dashboard(user: SessionUser, weekValue?: unknown, selectedId?: un
     weekEnd,
     jobs,
     employees,
+    archivedEmployees,
     target,
     entries,
     paid: Boolean(pay?.paid),
+    received: Boolean(pay?.received),
+    paymentDate: pay?.paymentDate ?? "",
+    paymentMethod: pay?.paymentMethod ?? "",
     checkNumber: pay?.checkNumber ?? "",
     pendingTimeOffCount: Number(pending?.count ?? 0),
+    pendingJobReviewCount: Number(pendingJobReviews?.count ?? 0),
     syncToken: await latestSyncToken(),
     push: push.appId
       ? { configured: true, sendingConfigured: Boolean(push.apiKey), appId: push.appId, safariWebId: push.safariWebId, externalId: `timecard-user-${user.id}` }
@@ -251,7 +397,7 @@ async function payReport(employeeId: number, startDate: string, endDate: string)
        ORDER BY t.work_date, j.name`,
     ).bind(employeeId, startDate, endDate).all(),
     database().prepare(
-      `SELECT week_start AS weekStart, paid, check_number AS checkNumber
+      `SELECT week_start AS weekStart, paid, received, payment_date AS paymentDate, payment_method AS paymentMethod, check_number AS checkNumber
        FROM pay_weeks WHERE user_id = ? AND week_start BETWEEN ? AND ? ORDER BY week_start`,
     ).bind(employeeId, sundayOf(startDate), endDate).all(),
   ]);
@@ -287,9 +433,39 @@ export async function GET(request: Request) {
     if (!count?.count) return json({ configured: false, syncToken: await latestSyncToken() });
     const user = await currentUser(request);
     if (!user) {
-      const people = (await database().prepare(`SELECT id, name FROM users WHERE role = 'employee' ORDER BY name`).all()).results;
-      const admins = (await database().prepare(`SELECT id, name FROM users WHERE role = 'admin' ORDER BY name`).all()).results;
+      const people = (await database().prepare(`SELECT id, name FROM users WHERE role = 'employee' AND active = 1 ORDER BY name`).all()).results;
+      const admins = (await database().prepare(`SELECT id, name FROM users WHERE role = 'admin' AND active = 1 ORDER BY name`).all()).results;
       return json({ configured: true, authenticated: false, employees: people, admins, syncToken: await latestSyncToken() });
+    }
+    try {
+      await refreshJobMismatchReviews(request);
+    } catch (error) {
+      // A review scan must never stop normal time-card access.
+      console.error("Job mismatch scan failed", error);
+    }
+    if (url.searchParams.get("jobReviews") === "1") {
+      if (user.role !== "admin") return json({ error: "Administrator access required." }, 403);
+      const reviews = (await database().prepare(
+        `SELECT r.id, r.start_date AS startDate, r.end_date AS endDate, r.dates, r.hours_a AS hoursA, r.hours_b AS hoursB,
+           r.confidence, r.user_a_id AS userAId, ua.name AS userAName, r.user_b_id AS userBId, ub.name AS userBName,
+           r.job_a_id AS jobAId, ja.name AS jobAName, r.job_b_id AS jobBId, jb.name AS jobBName,
+           r.created_at AS createdAt
+         FROM job_mismatch_reviews r
+         JOIN users ua ON ua.id = r.user_a_id
+         JOIN users ub ON ub.id = r.user_b_id
+         JOIN jobs ja ON ja.id = r.job_a_id
+         JOIN jobs jb ON jb.id = r.job_b_id
+         WHERE r.status = 'pending'
+         ORDER BY r.start_date DESC, r.id DESC`,
+      ).all()).results as Array<Record<string, unknown>>;
+      const jobs = (await database().prepare(`SELECT id, name, active FROM jobs ORDER BY active DESC, LOWER(name)`).all()).results;
+      return json({
+        reviews: reviews.map((review) => ({
+          ...review,
+          dates: parsedStringArray(String(review.dates ?? "[]")),
+        })),
+        jobs,
+      });
     }
     if (url.searchParams.get("timeOff") === "1") {
       const month = url.searchParams.get("month") ?? todayEastern().slice(0, 7);
@@ -316,8 +492,8 @@ export async function GET(request: Request) {
       return json({ requests, monthStart, monthEnd });
     }
     if (url.searchParams.get("report") === "pay") {
-      if (user.role !== "admin") return json({ error: "Administrator access required." }, 403);
-      const employeeId = Number(url.searchParams.get("employeeId"));
+      const requestedEmployeeId = Number(url.searchParams.get("employeeId"));
+      const employeeId = user.role === "admin" ? requestedEmployeeId : user.id;
       const startDate = url.searchParams.get("startDate") ?? "";
       const endDate = url.searchParams.get("endDate") ?? "";
       if (!employeeId || !validDate(startDate) || !validDate(endDate) || endDate < startDate) {
@@ -326,10 +502,37 @@ export async function GET(request: Request) {
       const report = await payReport(employeeId, startDate, endDate);
       return report ? json(report) : json({ error: "Employee not found." }, 404);
     }
+    if (url.searchParams.get("report") === "job-hours") {
+      if (user.role !== "admin") return json({ error: "Administrator access required." }, 403);
+      const rows = (await database().prepare(
+        `SELECT j.id AS jobId, j.name AS jobName, j.active AS jobActive, u.id AS userId, u.name AS employeeName,
+           COALESCE(u.active, 1) AS userActive, COALESCE(SUM(t.hours), 0) AS hours
+         FROM jobs j
+         LEFT JOIN time_entries t ON t.job_id = j.id
+         LEFT JOIN users u ON u.id = t.user_id
+         GROUP BY j.id, j.name, j.active, u.id, u.name, u.active
+         ORDER BY j.active DESC, LOWER(j.name), hours DESC, LOWER(u.name)`,
+      ).all()).results as Array<Record<string, unknown>>;
+      const jobs = new Map<number, { id: number; name: string; active: boolean; totalHours: number; people: Array<{ id: number; name: string; hours: number; archived: boolean }> }>();
+      rows.forEach((row) => {
+        const jobId = Number(row.jobId);
+        const job = jobs.get(jobId) ?? { id: jobId, name: String(row.jobName), active: Boolean(row.jobActive), totalHours: 0, people: [] };
+        const hours = Number(row.hours);
+        job.totalHours += hours;
+        if (row.userId != null) job.people.push({
+          id: Number(row.userId),
+          name: String(row.employeeName),
+          hours,
+          archived: !Boolean(row.userActive),
+        });
+        jobs.set(jobId, job);
+      });
+      return json({ jobs: [...jobs.values()] });
+    }
     const download = url.searchParams.get("download");
     if (download) {
-      if (user.role !== "admin") return json({ error: "Administrator access required." }, 403);
       if (download === "csv") {
+        if (user.role !== "admin") return json({ error: "Administrator access required." }, 403);
         const weekStart = sundayOf(url.searchParams.get("week"));
         const end = new Date(`${weekStart}T12:00:00Z`);
         end.setUTCDate(end.getUTCDate() + 6);
@@ -340,7 +543,9 @@ export async function GET(request: Request) {
              COALESCE((SELECT r.rate FROM employee_pay_rates r WHERE r.user_id = t.user_id AND r.effective_from <= t.work_date ORDER BY r.effective_from DESC, r.id DESC LIMIT 1), u.hourly_rate) AS hourlyRate,
              t.work_date AS workDate, j.name AS job, t.hours, t.note,
              t.flagged, t.flag_reason AS flagReason, t.resolved, t.resolution,
-             COALESCE(p.paid, 0) AS paid, COALESCE(p.check_number, '') AS checkNumber
+             COALESCE(p.paid, 0) AS paid, COALESCE(p.received, 0) AS received,
+             COALESCE(p.payment_date, '') AS paymentDate, COALESCE(p.payment_method, '') AS paymentMethod,
+             COALESCE(p.check_number, '') AS checkNumber
            FROM time_entries t
            JOIN users u ON u.id = t.user_id
            JOIN jobs j ON j.id = t.job_id
@@ -348,11 +553,12 @@ export async function GET(request: Request) {
            WHERE t.work_date BETWEEN ? AND ? AND (? = 0 OR t.user_id = ?)
            ORDER BY u.name, t.work_date, j.name`,
         ).bind(weekStart, weekStart, weekEnd, employeeId, employeeId).all()).results as Record<string, unknown>[];
-        const header = ["Employee", "Date", "Job", "Hours", "Hourly Rate", "Entry Pay", "Note", "Flagged", "Flag Reason", "Resolved", "Resolution", "Paid", "Check Number"];
+        const header = ["Employee", "Date", "Job", "Hours", "Hourly Rate", "Entry Pay", "Note", "Flagged", "Flag Reason", "Resolved", "Resolution", "Payment Issued", "Employee Confirmed Received", "Payment Date", "Payment Method", "Check Number"];
         const lines = rows.map((row) => [
           row.employee, row.workDate, row.job, Number(row.hours).toFixed(2), Number(row.hourlyRate).toFixed(2),
           (Number(row.hours) * Number(row.hourlyRate)).toFixed(2), row.note,
-          row.flagged ? "Yes" : "No", row.flagReason, row.resolved ? "Yes" : "No", row.resolution, row.paid ? "Yes" : "No", row.checkNumber,
+          row.flagged ? "Yes" : "No", row.flagReason, row.resolved ? "Yes" : "No", row.resolution,
+          row.paid ? "Yes" : "No", row.received ? "Yes" : "No", row.paymentDate, row.paymentMethod, row.checkNumber,
         ].map(csvCell).join(","));
         const csv = [header.map(csvCell).join(","), ...lines].join("\r\n");
         return new Response(csv, {
@@ -364,7 +570,8 @@ export async function GET(request: Request) {
         });
       }
       if (download === "pay-report") {
-        const employeeId = Number(url.searchParams.get("employeeId"));
+        const requestedEmployeeId = Number(url.searchParams.get("employeeId"));
+        const employeeId = user.role === "admin" ? requestedEmployeeId : user.id;
         const startDate = url.searchParams.get("startDate") ?? "";
         const endDate = url.searchParams.get("endDate") ?? "";
         if (!employeeId || !validDate(startDate) || !validDate(endDate) || endDate < startDate) {
@@ -373,13 +580,14 @@ export async function GET(request: Request) {
         const report = await payReport(employeeId, startDate, endDate);
         if (!report) return json({ error: "Employee not found." }, 404);
         const paidByWeek = new Map((report.paidWeeks as Array<Record<string, unknown>>).map((item) => [String(item.weekStart), item]));
-        const header = ["Employee", "Date", "Week Starting", "Job", "Hours", "Hourly Rate Used", "Calculated Gross Pay", "Paid", "Check Number"];
+        const header = ["Employee", "Date", "Week Starting", "Job", "Hours", "Hourly Rate Used", "Calculated Gross Pay", "Payment Issued", "Employee Confirmed Received", "Payment Date", "Payment Method", "Check Number"];
         const lines = (report.entries as Array<Record<string, unknown>>).map((row) => {
           const weekStart = sundayOf(row.workDate);
           const payment = paidByWeek.get(weekStart);
           return [
             report.employee.name, row.workDate, weekStart, row.job, Number(row.hours).toFixed(2), Number(row.hourlyRate).toFixed(2),
-            (Number(row.hours) * Number(row.hourlyRate)).toFixed(2), payment?.paid ? "Yes" : "No", payment?.checkNumber ?? "",
+            (Number(row.hours) * Number(row.hourlyRate)).toFixed(2), payment?.paid ? "Yes" : "No", payment?.received ? "Yes" : "No",
+            payment?.paymentDate ?? "", payment?.paymentMethod ?? "", payment?.checkNumber ?? "",
           ].map(csvCell).join(",");
         });
         const csv = [header.map(csvCell).join(","), ...lines].join("\r\n");
@@ -393,19 +601,21 @@ export async function GET(request: Request) {
         });
       }
       if (download === "backup") {
-        const [users, jobs, entries, payWeeks, payRateHistory, timeOff, history] = await Promise.all([
-          database().prepare(`SELECT id, name, phone, role, hourly_rate AS hourlyRate, created_at AS createdAt FROM users ORDER BY id`).all(),
+        if (user.role !== "admin") return json({ error: "Administrator access required." }, 403);
+        const [users, jobs, entries, payWeeks, payRateHistory, timeOff, jobMismatchReviews, history] = await Promise.all([
+          database().prepare(`SELECT id, name, phone, role, hourly_rate AS hourlyRate, active, created_at AS createdAt FROM users ORDER BY id`).all(),
           database().prepare(`SELECT id, name, active, created_at AS createdAt FROM jobs ORDER BY id`).all(),
           database().prepare(`SELECT id, user_id AS userId, job_id AS jobId, work_date AS workDate, hours, note, flagged, flag_reason AS flagReason, resolution, resolved, updated_at AS updatedAt FROM time_entries ORDER BY work_date, id`).all(),
-          database().prepare(`SELECT id, user_id AS userId, week_start AS weekStart, paid, check_number AS checkNumber, updated_at AS updatedAt FROM pay_weeks ORDER BY week_start, id`).all(),
+          database().prepare(`SELECT id, user_id AS userId, week_start AS weekStart, paid, received, payment_date AS paymentDate, payment_method AS paymentMethod, check_number AS checkNumber, updated_at AS updatedAt FROM pay_weeks ORDER BY week_start, id`).all(),
           database().prepare(`SELECT id, user_id AS userId, rate, effective_from AS effectiveFrom, created_at AS createdAt FROM employee_pay_rates ORDER BY user_id, effective_from, id`).all(),
           database().prepare(`SELECT id, user_id AS userId, start_date AS startDate, end_date AS endDate, note, status, reviewed_by AS reviewedBy, review_note AS reviewNote, requested_at AS requestedAt, reviewed_at AS reviewedAt, updated_at AS updatedAt, reminder_sent_at AS reminderSentAt FROM time_off_requests ORDER BY start_date, id`).all(),
+          database().prepare(`SELECT id, fingerprint, user_a_id AS userAId, user_b_id AS userBId, job_a_id AS jobAId, job_b_id AS jobBId, start_date AS startDate, end_date AS endDate, dates, entry_ids_a AS entryIdsA, entry_ids_b AS entryIdsB, hours_a AS hoursA, hours_b AS hoursB, confidence, status, reviewed_by AS reviewedBy, reviewed_at AS reviewedAt, selected_job_id AS selectedJobId, notification_id AS notificationId, notification_sent_at AS notificationSentAt, created_at AS createdAt, updated_at AS updatedAt FROM job_mismatch_reviews ORDER BY id`).all(),
           database().prepare(`SELECT id, actor_id AS actorId, actor_name AS actorName, action, target_type AS targetType, target_id AS targetId, summary, details, created_at AS createdAt FROM audit_log ORDER BY id`).all(),
         ]);
         const backup = JSON.stringify({
-          format: "time-card-backup-v2",
+          format: "time-card-backup-v3",
           exportedAt: new Date().toISOString(),
-          users: users.results, jobs: jobs.results, timeEntries: entries.results, payWeeks: payWeeks.results, payRateHistory: payRateHistory.results, timeOffRequests: timeOff.results, auditLog: history.results,
+          users: users.results, jobs: jobs.results, timeEntries: entries.results, payWeeks: payWeeks.results, payRateHistory: payRateHistory.results, timeOffRequests: timeOff.results, jobMismatchReviews: jobMismatchReviews.results, auditLog: history.results,
         }, null, 2);
         return new Response(backup, {
           headers: {
@@ -454,9 +664,31 @@ export async function POST(request: Request) {
     if (action === "login") {
       const id = Number(body.userId);
       const pin = String(body.pin ?? "");
-      const person = await database().prepare(`SELECT id, name, role, pin_hash AS pinHash, pin_salt AS pinSalt FROM users WHERE id = ?`)
+      const person = await database().prepare(`SELECT id, name, role, pin_hash AS pinHash, pin_salt AS pinSalt FROM users WHERE id = ? AND active = 1`)
         .bind(id).first<SessionUser & { pinHash: string; pinSalt: string }>();
-      if (!person || (await pinHash(pin, person.pinSalt)) !== person.pinHash) return json({ error: "That PIN is incorrect." }, 401);
+      if (!person) return json({ error: "That PIN is incorrect." }, 401);
+      const attempts = await database().prepare(
+        `SELECT failed_count AS failedCount, window_started_at AS windowStartedAt, locked_until AS lockedUntil FROM login_attempts WHERE user_id = ?`,
+      ).bind(person.id).first<{ failedCount: number; windowStartedAt: string; lockedUntil: string }>();
+      if (attempts?.lockedUntil && new Date(attempts.lockedUntil).getTime() > Date.now()) {
+        const retryAfter = Math.max(1, Math.ceil((new Date(attempts.lockedUntil).getTime() - Date.now()) / 1000));
+        return json({ error: `Too many incorrect PIN attempts. Try again in ${Math.ceil(retryAfter / 60)} minute${retryAfter > 60 ? "s" : ""}.` }, 429, { "Retry-After": String(retryAfter) });
+      }
+      const matches = secureEqual(await pinHash(pin, person.pinSalt), person.pinHash);
+      if (!matches) {
+        const windowExpired = !attempts?.windowStartedAt || Date.now() - new Date(attempts.windowStartedAt).getTime() > 30 * 60_000;
+        const failedCount = windowExpired ? 1 : Number(attempts?.failedCount ?? 0) + 1;
+        const windowStartedAt = windowExpired ? now : attempts!.windowStartedAt;
+        const delaySeconds = loginDelaySeconds(failedCount);
+        const lockedUntil = delaySeconds ? new Date(Date.now() + delaySeconds * 1000).toISOString() : "";
+        await database().prepare(
+          `INSERT INTO login_attempts (user_id, failed_count, window_started_at, locked_until, updated_at) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(user_id) DO UPDATE SET failed_count=excluded.failed_count, window_started_at=excluded.window_started_at, locked_until=excluded.locked_until, updated_at=excluded.updated_at`,
+        ).bind(person.id, failedCount, windowStartedAt, lockedUntil, now).run();
+        if (delaySeconds) return json({ error: `Too many incorrect PIN attempts. Try again in ${Math.ceil(delaySeconds / 60)} minute${delaySeconds > 60 ? "s" : ""}.` }, 429, { "Retry-After": String(delaySeconds) });
+        return json({ error: "That PIN is incorrect." }, 401);
+      }
+      await database().prepare(`DELETE FROM login_attempts WHERE user_id = ?`).bind(person.id).run();
       const token = b64(crypto.getRandomValues(new Uint8Array(32)));
       const expires = new Date(Date.now() + 14 * 86400000).toISOString();
       await database().prepare(`INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)`)
@@ -496,12 +728,17 @@ export async function POST(request: Request) {
       const saved = await database().prepare(
         `SELECT id FROM time_off_requests WHERE user_id = ? ORDER BY id DESC LIMIT 1`,
       ).bind(user.id).first<{ id: number }>();
-      const adminRows = (await database().prepare(`SELECT id FROM users WHERE role = 'admin' ORDER BY id`).all()).results as Array<{ id: number }>;
+      const adminRows = (await database().prepare(`SELECT id FROM users WHERE role = 'admin' AND active = 1 ORDER BY id`).all()).results as Array<{ id: number }>;
+      const requestUrl = new URL(`/?tab=timeoff&request=${saved?.id ?? ""}&month=${startDate.slice(0, 7)}`, request.url).toString();
       const push = await sendPush(
         adminRows.map((item) => Number(item.id)),
         "New time-off request",
         `${user.name} requested ${dateRangeLabel(startDate, endDate)}.`,
-        new URL("/?tab=timeoff", request.url).toString(),
+        requestUrl,
+        saved?.id ? [
+          { id: "approve", text: "Approve", url: new URL(`/?tab=timeoff&request=${saved.id}&decision=approved&month=${startDate.slice(0, 7)}`, request.url).toString() },
+          { id: "deny", text: "Deny", url: new URL(`/?tab=timeoff&request=${saved.id}&decision=denied&month=${startDate.slice(0, 7)}`, request.url).toString() },
+        ] : [],
       );
       await audit(user, "request", "time_off", saved?.id ?? "", `Requested time off for ${dateRangeLabel(startDate, endDate)}`, { startDate, endDate, note, pushSent: push.sent });
       return json({ ok: true, pushSent: push.sent });
@@ -515,12 +752,12 @@ export async function POST(request: Request) {
       ).bind(id, user.id).first<{ id: number; startDate: string; endDate: string; status: string }>();
       if (!before || before.status !== "pending") return json({ error: "Only a pending request can be cancelled." }, 409);
       await database().prepare(`UPDATE time_off_requests SET status = 'cancelled', updated_at = ? WHERE id = ?`).bind(now, id).run();
-      const adminRows = (await database().prepare(`SELECT id FROM users WHERE role = 'admin' ORDER BY id`).all()).results as Array<{ id: number }>;
+      const adminRows = (await database().prepare(`SELECT id FROM users WHERE role = 'admin' AND active = 1 ORDER BY id`).all()).results as Array<{ id: number }>;
       await sendPush(
         adminRows.map((item) => Number(item.id)),
         "Time-off request cancelled",
         `${user.name} cancelled ${dateRangeLabel(before.startDate, before.endDate)}.`,
-        new URL("/?tab=timeoff", request.url).toString(),
+        new URL(`/?tab=timeoff&request=${id}&month=${before.startDate.slice(0, 7)}`, request.url).toString(),
       );
       await audit(user, "cancel", "time_off", id, `Cancelled time off for ${dateRangeLabel(before.startDate, before.endDate)}`, { before });
       return json({ ok: true });
@@ -546,7 +783,7 @@ export async function POST(request: Request) {
         [before.userId],
         decision === "approved" ? "Time off approved" : "Time-off request denied",
         decision === "approved" ? `Your time off for ${range} was approved.` : `Your time-off request for ${range} was denied.`,
-        new URL("/?tab=timeoff", request.url).toString(),
+        new URL(`/?tab=timeoff&request=${id}&month=${before.startDate.slice(0, 7)}`, request.url).toString(),
       );
       await audit(user, decision === "approved" ? "approve" : "deny", "time_off", id, `${decision === "approved" ? "Approved" : "Denied"} ${before.userName}'s time off for ${range}`, { before, reviewNote, reminderQueued, employeePushSent: employeePush.sent });
       return json({ ok: true, reminderQueued, employeePushSent: employeePush.sent });
@@ -556,11 +793,21 @@ export async function POST(request: Request) {
       const targetId = user.role === "admin" ? Number(body.userId) : user.id;
       const jobId = Number(body.jobId);
       const workDate = String(body.workDate ?? "");
-      const hours = Math.max(0, Math.min(24, Number(body.hours) || 0));
+      const hours = Number(body.hours) || 0;
       const note = String(body.note ?? "").trim().slice(0, 500);
       const flagged = Boolean(body.flagged);
       const flagReason = flagged ? String(body.flagReason ?? "").trim().slice(0, 500) : "";
-      if (!targetId || !jobId || !/^\d{4}-\d{2}-\d{2}$/.test(workDate)) return json({ error: "The time entry is incomplete." }, 400);
+      if (!targetId || !jobId || !validDate(workDate)) return json({ error: "The time entry is incomplete." }, 400);
+      if (!Number.isFinite(hours) || hours < 0 || hours > 24) return json({ error: "Hours for one job must be between 0 and 24." }, 400);
+      const [target, job] = await Promise.all([
+        user.role === "admin"
+          ? database().prepare(`SELECT id FROM users WHERE id = ? AND active = 1 AND (role = 'employee' OR id = ?)`).bind(targetId, user.id).first()
+          : database().prepare(`SELECT id FROM users WHERE id = ? AND role = 'employee' AND active = 1`).bind(targetId).first(),
+        user.role === "admin"
+          ? database().prepare(`SELECT id FROM jobs WHERE id = ?`).bind(jobId).first()
+          : database().prepare(`SELECT id FROM jobs WHERE id = ? AND active = 1`).bind(jobId).first(),
+      ]);
+      if (!target || !job) return json({ error: "That employee or job is no longer active." }, 409);
       if (hours === 0 && !note && !flagged) {
         const before = await database().prepare(
           `SELECT id, hours, note, flagged, flag_reason AS flagReason FROM time_entries WHERE user_id = ? AND job_id = ? AND work_date = ?`,
@@ -569,7 +816,18 @@ export async function POST(request: Request) {
           `DELETE FROM time_entries WHERE user_id = ? AND job_id = ? AND work_date = ?`,
         ).bind(targetId, jobId, workDate).run();
         if (before) await audit(user, "delete", "time_entry", String(before.id), `Removed time for ${workDate}`, { userId: targetId, jobId, before });
+        await refreshJobMismatchReviews(request);
         return json({ ok: true, deleted: true });
+      }
+      const otherHours = await database().prepare(
+        `SELECT COALESCE(SUM(hours), 0) AS hours FROM time_entries WHERE user_id = ? AND work_date = ? AND job_id <> ?`,
+      ).bind(targetId, workDate, jobId).first<{ hours: number }>();
+      const warnings = [
+        ...(workDate > todayEastern() ? ["This entry is dated in the future."] : []),
+        ...(Number(otherHours?.hours ?? 0) + hours > 24 ? [`This would make the day's total ${(Number(otherHours?.hours ?? 0) + hours).toFixed(2)} hours.`] : []),
+      ];
+      if (warnings.length && !body.warningsAccepted) {
+        return json({ error: `${warnings.join(" ")} Confirm the warning in the time-entry window to save it.` }, 409);
       }
       const before = await database().prepare(
         `SELECT id, hours, note, flagged, flag_reason AS flagReason FROM time_entries WHERE user_id = ? AND job_id = ? AND work_date = ?`,
@@ -582,7 +840,102 @@ export async function POST(request: Request) {
         `SELECT id, hours, note, flagged, flag_reason AS flagReason FROM time_entries WHERE user_id = ? AND job_id = ? AND work_date = ?`,
       ).bind(targetId, jobId, workDate).first<{ id: number } & Record<string, unknown>>();
       if (saved) await audit(user, before ? "update" : "create", "time_entry", saved.id, `${before ? "Changed" : "Added"} ${hours.toFixed(2)} hours for ${workDate}`, { userId: targetId, jobId, before: before ?? null, after: saved });
+      await refreshJobMismatchReviews(request);
       return json({ ok: true });
+    }
+
+    if (action === "moveEntry") {
+      if (user.role !== "admin") return json({ error: "Administrator access required." }, 403);
+      const entryId = Number(body.entryId);
+      const jobId = Number(body.jobId);
+      const before = await database().prepare(
+        `SELECT t.id, t.user_id AS userId, t.job_id AS jobId, t.work_date AS workDate, t.hours, j.name AS jobName, u.name AS userName
+         FROM time_entries t JOIN jobs j ON j.id = t.job_id JOIN users u ON u.id = t.user_id WHERE t.id = ?`,
+      ).bind(entryId).first<{ id: number; userId: number; jobId: number; workDate: string; hours: number; jobName: string; userName: string }>();
+      const destination = await database().prepare(`SELECT id, name FROM jobs WHERE id = ?`).bind(jobId).first<{ id: number; name: string }>();
+      if (!before || !destination) return json({ error: "That time entry or destination job no longer exists." }, 404);
+      if (before.jobId === destination.id) return json({ error: "Choose a different job." }, 400);
+      const existing = await database().prepare(
+        `SELECT id FROM time_entries WHERE user_id = ? AND job_id = ? AND work_date = ?`,
+      ).bind(before.userId, destination.id, before.workDate).first();
+      if (existing) return json({ error: `${before.userName} already has time on ${destination.name} for that day. Edit that entry first.` }, 409);
+      await database().prepare(`UPDATE time_entries SET job_id = ?, updated_at = ? WHERE id = ?`).bind(destination.id, now, entryId).run();
+      await audit(user, "move", "time_entry", entryId, `Moved ${before.hours.toFixed(2)} hours from ${before.jobName} to ${destination.name}`, { before, after: { ...before, jobId: destination.id, jobName: destination.name } });
+      await refreshJobMismatchReviews(request);
+      return json({ ok: true });
+    }
+
+    if (action === "resolveJobMismatch") {
+      if (user.role !== "admin") return json({ error: "Administrator access required." }, 403);
+      const reviewId = Number(body.reviewId);
+      const decision = String(body.decision ?? "");
+      if (!reviewId || !["jobA", "jobB", "other", "separate"].includes(decision)) {
+        return json({ error: "Choose how these hours should be handled." }, 400);
+      }
+      const review = await database().prepare(
+        `SELECT r.id, r.status, r.start_date AS startDate, r.end_date AS endDate, r.entry_ids_a AS entryIdsA,
+           r.entry_ids_b AS entryIdsB, r.job_a_id AS jobAId, ja.name AS jobAName, r.job_b_id AS jobBId,
+           jb.name AS jobBName, ua.name AS userAName, ub.name AS userBName
+         FROM job_mismatch_reviews r
+         JOIN jobs ja ON ja.id = r.job_a_id
+         JOIN jobs jb ON jb.id = r.job_b_id
+         JOIN users ua ON ua.id = r.user_a_id
+         JOIN users ub ON ub.id = r.user_b_id
+         WHERE r.id = ?`,
+      ).bind(reviewId).first<{
+        id: number; status: string; startDate: string; endDate: string; entryIdsA: string; entryIdsB: string;
+        jobAId: number; jobAName: string; jobBId: number; jobBName: string; userAName: string; userBName: string;
+      }>();
+      if (!review || review.status !== "pending") return json({ error: "That mismatch is no longer pending." }, 409);
+      const range = dateRangeLabel(review.startDate, review.endDate);
+      if (decision === "separate") {
+        await database().prepare(
+          `UPDATE job_mismatch_reviews SET status = 'separate', reviewed_by = ?, reviewed_at = ?, updated_at = ? WHERE id = ? AND status = 'pending'`,
+        ).bind(user.id, now, now, review.id).run();
+        await audit(user, "dismiss", "job_mismatch", review.id, `Confirmed ${review.userAName} and ${review.userBName} worked separate jobs for ${range}`, { review, decision });
+        return json({ ok: true, moved: 0 });
+      }
+
+      const requestedJobId = decision === "jobA" ? Number(review.jobAId) : decision === "jobB" ? Number(review.jobBId) : Number(body.jobId);
+      const destination = await database().prepare(`SELECT id, name FROM jobs WHERE id = ?`).bind(requestedJobId).first<{ id: number; name: string }>();
+      if (!destination) return json({ error: "Choose a valid destination job." }, 400);
+      const entryIds = [...new Set([...parsedNumberArray(review.entryIdsA), ...parsedNumberArray(review.entryIdsB)])].slice(0, 100);
+      if (!entryIds.length) return json({ error: "The affected time entries could not be found." }, 409);
+      const placeholders = entryIds.map(() => "?").join(",");
+      const entries = (await database().prepare(
+        `SELECT t.id, t.user_id AS userId, u.name AS userName, t.job_id AS jobId, j.name AS jobName,
+           t.work_date AS workDate, t.hours
+         FROM time_entries t JOIN users u ON u.id = t.user_id JOIN jobs j ON j.id = t.job_id
+         WHERE t.id IN (${placeholders}) ORDER BY t.work_date, t.id`,
+      ).bind(...entryIds).all()).results as Array<{
+        id: number; userId: number; userName: string; jobId: number; jobName: string; workDate: string; hours: number;
+      }>;
+      if (entries.length !== entryIds.length || entries.some((entry) => ![Number(review.jobAId), Number(review.jobBId)].includes(Number(entry.jobId)))) {
+        await database().prepare(`UPDATE job_mismatch_reviews SET status = 'stale', updated_at = ? WHERE id = ?`).bind(now, review.id).run();
+        return json({ error: "Those hours changed after this review was created. HazenTime removed the outdated suggestion." }, 409);
+      }
+      const moving = entries.filter((entry) => Number(entry.jobId) !== destination.id);
+      for (const entry of moving) {
+        const collision = await database().prepare(
+          `SELECT id FROM time_entries WHERE user_id = ? AND job_id = ? AND work_date = ? AND id <> ?`,
+        ).bind(entry.userId, destination.id, entry.workDate, entry.id).first();
+        if (collision) {
+          return json({ error: `${entry.userName} already has time on ${destination.name} for ${entry.workDate}. Review that day before applying this suggestion.` }, 409);
+        }
+      }
+      await database().batch([
+        ...moving.map((entry) => database().prepare(`UPDATE time_entries SET job_id = ?, updated_at = ? WHERE id = ?`).bind(destination.id, now, entry.id)),
+        database().prepare(
+          `UPDATE job_mismatch_reviews SET status = 'corrected', selected_job_id = ?, reviewed_by = ?, reviewed_at = ?, updated_at = ? WHERE id = ? AND status = 'pending'`,
+        ).bind(destination.id, user.id, now, now, review.id),
+      ]);
+      await audit(user, "correct", "job_mismatch", review.id, `Moved ${moving.length} ${moving.length === 1 ? "entry" : "entries"} to ${destination.name} for ${range}`, {
+        review,
+        destination,
+        movedEntries: moving,
+      });
+      await refreshJobMismatchReviews(request);
+      return json({ ok: true, moved: moving.length, destination: destination.name });
     }
 
     if (action === "resolve") {
@@ -596,19 +949,26 @@ export async function POST(request: Request) {
     if (action === "setPaid") {
       const targetId = user.role === "admin" ? Number(body.userId) : user.id;
       const weekStart = sundayOf(body.weekStart);
-      const checkNumber = user.role === "admin" ? String(body.checkNumber ?? "").trim().slice(0, 40) : null;
       if (user.role === "admin") {
+        const paid = Boolean(body.paid);
+        const checkNumber = String(body.checkNumber ?? "").trim().slice(0, 40);
+        const paymentMethod = String(body.paymentMethod ?? "").trim().slice(0, 40);
+        const requestedDate = String(body.paymentDate ?? "");
+        const paymentDate = paid ? requestedDate || todayEastern() : requestedDate;
+        if (paymentDate && !validDate(paymentDate)) return json({ error: "Choose a valid payment date." }, 400);
         await database().prepare(
-          `INSERT INTO pay_weeks (user_id, week_start, paid, check_number, updated_at) VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT(user_id, week_start) DO UPDATE SET paid=excluded.paid, check_number=excluded.check_number, updated_at=excluded.updated_at`,
-        ).bind(targetId, weekStart, body.paid ? 1 : 0, checkNumber, now).run();
+          `INSERT INTO pay_weeks (user_id, week_start, paid, received, payment_date, payment_method, check_number, updated_at) VALUES (?, ?, ?, 0, ?, ?, ?, ?)
+           ON CONFLICT(user_id, week_start) DO UPDATE SET paid=excluded.paid, payment_date=excluded.payment_date, payment_method=excluded.payment_method, check_number=excluded.check_number, updated_at=excluded.updated_at`,
+        ).bind(targetId, weekStart, paid ? 1 : 0, paymentDate, paymentMethod, checkNumber, now).run();
+        await audit(user, "payment_issued", "pay_week", `${targetId}:${weekStart}`, paid ? `Recorded payment issued for week of ${weekStart}` : `Marked payment not issued for week of ${weekStart}`, { userId: targetId, weekStart, paid, paymentDate, paymentMethod, checkNumber });
       } else {
+        const received = Boolean(body.received);
         await database().prepare(
-          `INSERT INTO pay_weeks (user_id, week_start, paid, check_number, updated_at) VALUES (?, ?, ?, '', ?)
-           ON CONFLICT(user_id, week_start) DO UPDATE SET paid=excluded.paid, updated_at=excluded.updated_at`,
-        ).bind(targetId, weekStart, body.paid ? 1 : 0, now).run();
+          `INSERT INTO pay_weeks (user_id, week_start, paid, received, payment_date, payment_method, check_number, updated_at) VALUES (?, ?, 0, ?, '', '', '', ?)
+           ON CONFLICT(user_id, week_start) DO UPDATE SET received=excluded.received, updated_at=excluded.updated_at`,
+        ).bind(targetId, weekStart, received ? 1 : 0, now).run();
+        await audit(user, "payment_received", "pay_week", `${targetId}:${weekStart}`, received ? `Confirmed payment received for week of ${weekStart}` : `Removed payment-received confirmation for week of ${weekStart}`, { userId: targetId, weekStart, received });
       }
-      await audit(user, "paid_status", "pay_week", `${targetId}:${weekStart}`, body.paid ? `Updated payment record for week of ${weekStart}` : `Marked week of ${weekStart} unpaid`, { userId: targetId, weekStart, paid: Boolean(body.paid), checkNumber: checkNumber ?? undefined });
       return json({ ok: true });
     }
 
@@ -677,11 +1037,25 @@ export async function POST(request: Request) {
       return json({ ok: true });
     }
 
-    if (action === "deleteEmployee") {
+    if (action === "archiveEmployee" || action === "deleteEmployee") {
       const id = Number(body.id);
-      const before = await database().prepare(`SELECT id, name, phone, hourly_rate AS hourlyRate FROM users WHERE id = ? AND role = 'employee'`).bind(id).first<{ name: string } & Record<string, unknown>>();
-      if (before) await audit(user, "delete", "employee", id, `Removed employee ${before.name}, their time cards, and time-off requests`, { before });
-      await database().prepare(`DELETE FROM users WHERE id = ? AND role = 'employee'`).bind(id).run();
+      const before = await database().prepare(`SELECT id, name, phone, hourly_rate AS hourlyRate, active FROM users WHERE id = ? AND role = 'employee'`).bind(id).first<{ name: string } & Record<string, unknown>>();
+      if (!before) return json({ error: "Employee not found." }, 404);
+      await database().batch([
+        database().prepare(`UPDATE users SET active = 0 WHERE id = ? AND role = 'employee'`).bind(id),
+        database().prepare(`DELETE FROM sessions WHERE user_id = ?`).bind(id),
+        database().prepare(`DELETE FROM login_attempts WHERE user_id = ?`).bind(id),
+      ]);
+      await audit(user, "archive", "employee", id, `Removed ${before.name} from active employees while preserving all records`, { before });
+      return json({ ok: true });
+    }
+
+    if (action === "restoreEmployee") {
+      const id = Number(body.id);
+      const before = await database().prepare(`SELECT id, name, active FROM users WHERE id = ? AND role = 'employee'`).bind(id).first<{ name: string; active: number }>();
+      if (!before) return json({ error: "Employee not found." }, 404);
+      await database().prepare(`UPDATE users SET active = 1 WHERE id = ? AND role = 'employee'`).bind(id).run();
+      await audit(user, "restore", "employee", id, `Restored ${before.name} to active employees`, { before });
       return json({ ok: true });
     }
 
@@ -693,6 +1067,16 @@ export async function POST(request: Request) {
       else await database().prepare(`INSERT INTO jobs (name, created_at) VALUES (?, ?)`).bind(name, now).run();
       const saved = id ? { id } : await database().prepare(`SELECT id FROM jobs ORDER BY id DESC LIMIT 1`).first<{ id: number }>();
       await audit(user, id ? "update" : "create", "job", id || saved?.id || "", `${id ? "Renamed" : "Added"} job ${name}`, { name });
+      return json({ ok: true });
+    }
+
+    if (action === "completeJob" || action === "reopenJob") {
+      const id = Number(body.id);
+      const active = action === "reopenJob" ? 1 : 0;
+      const before = await database().prepare(`SELECT id, name, active FROM jobs WHERE id = ?`).bind(id).first<{ id: number; name: string; active: number }>();
+      if (!before) return json({ error: "Job not found." }, 404);
+      await database().prepare(`UPDATE jobs SET active = ? WHERE id = ?`).bind(active, id).run();
+      await audit(user, active ? "reopen" : "complete", "job", id, `${active ? "Reopened" : "Completed"} job ${before.name}`, { before, after: { ...before, active } });
       return json({ ok: true });
     }
 
