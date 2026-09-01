@@ -9,7 +9,7 @@ This README is the source-of-truth handoff for future AI work on this project. R
 - Live site: <https://time-card.tylerberg45.chatgpt.site>
 - Public source backup: <https://github.com/Tylerberg45/Time-card-app>
 - Sites project ID: `appgprj_6a6b30764aec8191940816fd9528c54d`
-- Last published version at the time this README was written: **Version 30**.
+- Last published version at the time this README was written: **Version 30**. The next saved release is Version 31 and is not live until explicitly deployed.
 - Last Sites source commit: `fc726e5629641c350899fe669413516ca6e2285d`.
 - Last public GitHub backup commit: <https://github.com/Tylerberg45/Time-card-app/commit/b73a1986459689caca8cfeb914e9f86c3fd92a36>
 
@@ -80,6 +80,10 @@ The local project directory may differ between sessions. The repository root is 
 - Receipt images are stored in the private R2 bucket under `receipts/`; the database stores only the object key and searchable metadata. `GET ?receiptImage=<id>` requires an administrator session and returns a private, no-store image response.
 - Expense metadata is included in manual and daily JSON backups. Receipt image objects remain in R2 separately; do not expose them publicly.
 - Expenses can be edited or deleted by an administrator, with an audit-log entry for each change.
+- Version 31 adds a combined **Job costs** report: all recorded labor hours and effective-rate labor cost plus receipt expenses and sales tax, grouped by job. Each job includes a breakdown of who worked it and expense totals by category; optional start/end dates filter the report.
+- The Expenses screen now has filterable totals by job, category, and purchase-date range, with receipt total, before-tax total, sales tax, and category subtotals.
+- Receipt records show private image thumbnails for quick review. A same-vendor/same-date/same-amount match is marked as a possible duplicate for Corbin to review; it never blocks saving or deletes anything automatically.
+- `expenses.sales_tax` stores the tax portion separately. Existing expense rows roll forward with a safe default of zero through `ensureSchema()`.
 
 ## Data and storage
 
