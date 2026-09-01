@@ -139,11 +139,18 @@ test("adds an admin receipt expense tracker with private images and OCR review",
   assert.match(schema, /export const expenses/);
   assert.match(appSource, />Expenses</);
   assert.match(appSource, /Receipt photo/);
+  assert.match(appSource, /Sales tax/);
+  assert.match(appSource, /Expense report/);
+  assert.match(appSource, /expenseThumb/);
+  assert.match(appSource, /Possible duplicate/);
   assert.match(appSource, /Extracted text/);
   assert.match(appSource, /createWorker\("eng"\)/);
   assert.match(apiSource, /if \(action === "saveExpense"\)/);
   assert.match(apiSource, /receiptFile\.arrayBuffer\(\)/);
   assert.match(apiSource, /receiptImage/);
+  assert.match(apiSource, /sales_tax AS salesTax/);
+  assert.match(apiSource, /possibleDuplicate/);
+  assert.match(apiSource, /report"\) === "job-costs"/);
   assert.match(apiSource, /Administrator access required/);
   assert.match(workerSource, /expenses: expenses\.results/);
 });

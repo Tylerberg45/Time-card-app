@@ -160,6 +160,7 @@ export const expenses = sqliteTable(
     vendor: text("vendor").notNull().default(""),
     category: text("category").notNull().default("Other"),
     amount: real("amount").notNull().default(0),
+    salesTax: real("sales_tax").notNull().default(0),
     note: text("note").notNull().default(""),
     ocrText: text("ocr_text").notNull().default(""),
     reviewed: integer("reviewed", { mode: "boolean" }).notNull().default(false),

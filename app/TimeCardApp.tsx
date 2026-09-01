@@ -24,9 +24,18 @@ type JobHoursReportData = {
     people: Array<{ id: number; name: string; hours: number; archived: boolean }>;
   }>;
 };
+type JobCostReportData = {
+  startDate: string; endDate: string;
+  jobs: Array<{
+    id: number; name: string; active: boolean; totalHours: number; laborCost: number; expenseTotal: number; salesTax: number; totalCost: number;
+    people: Array<{ id: number; name: string; hours: number; laborCost: number; archived: boolean }>;
+    expenseCategories: Array<{ category: string; amount: number; salesTax: number }>;
+  }>;
+  totals: { hours: number; laborCost: number; expenses: number; salesTax: number; totalCost: number };
+};
 type Expense = {
   id: number; jobId: number; jobName: string; jobActive: number; purchaseDate: string; vendor: string; category: string;
-  amount: number; note: string; ocrText: string; reviewed: boolean; hasReceipt: boolean; receiptType?: string; createdByName: string;
+  amount: number; salesTax: number; note: string; ocrText: string; reviewed: boolean; hasReceipt: boolean; possibleDuplicate: boolean; duplicateId?: number | null; receiptType?: string; createdByName: string;
 };
 type ExpenseData = { expenses: Expense[]; jobs: Job[] };
 type JobMismatchReview = {
@@ -133,7 +142,7 @@ const shiftMonth = (value: string, amount: number) => {
 
 // Change this version and update the items whenever a user-facing release ships.
 const RELEASE_NOTES = {
-  version: "2026.09.01.1",
+  version: "2026.09.01.2",
   date: "September 1, 2026",
   items: [
     { audience: "all", title: "Calendar-style time cards", detail: "Tap a day, enter or edit time, save it, and see the hours right in the calendar." },
@@ -151,6 +160,8 @@ const RELEASE_NOTES = {
     { audience: "admin", title: "Automatic private backups", detail: "A private recovery backup is now created every day and retained for 45 days." },
     { audience: "admin", title: "Faster time-off review", detail: "Time-off alerts now open the exact request, with quick Approve and Deny actions where the phone supports them." },
     { audience: "admin", title: "Receipt expense tracker", detail: "Capture receipt photos, assign expenses to jobs and categories, and review or correct the extracted text before saving." },
+    { audience: "admin", title: "Job cost reports", detail: "See labor plus expenses per job, including total hours, who worked them, expense categories, and sales tax." },
+    { audience: "admin", title: "Receipt review tools", detail: "Browse receipt thumbnails, filter expense totals, spot likely duplicate receipts, and record sales tax separately." },
   ],
 };
 
@@ -160,7 +171,7 @@ const RELEASE_NOTES = {
 const BETA_HOME_DEFAULT = true;
 const BETA_HOME_STORAGE_PREFIX = "hazentime-home-mode:";
 type HomeMode = "beta" | "classic";
-type AppTab = "home" | "time" | "timeoff" | "people" | "jobs" | "jobreports" | "jobreviews" | "expenses" | "reports" | "history" | "account";
+type AppTab = "home" | "time" | "timeoff" | "people" | "jobs" | "jobreports" | "jobcosts" | "jobreviews" | "expenses" | "reports" | "history" | "account";
 
 export default function TimeCardApp() {
   const [data, setData] = useState<Data | null>(null);
@@ -378,6 +389,7 @@ export default function TimeCardApp() {
             <button className={tab === "people" ? "active" : ""} onClick={() => changeTab("people")}>Employees</button>
             <button className={tab === "jobs" ? "active" : ""} onClick={() => changeTab("jobs")}>Jobs</button>
             <button className={tab === "jobreports" ? "active" : ""} onClick={() => changeTab("jobreports")}>Job hours</button>
+            <button className={tab === "jobcosts" ? "active" : ""} onClick={() => changeTab("jobcosts")}>Job costs</button>
             <button className={tab === "jobreviews" ? "active" : ""} onClick={() => changeTab("jobreviews")}>Job reviews{Boolean(data.pendingJobReviewCount) && <span className="tabBadge">{data.pendingJobReviewCount}</span>}</button>
             <button className={tab === "expenses" ? "active" : ""} onClick={() => changeTab("expenses")}>Expenses</button>
             <button className={tab === "history" ? "active" : ""} onClick={() => changeTab("history")}>History & backup</button>
@@ -396,6 +408,7 @@ export default function TimeCardApp() {
           <button onClick={() => { changeTab("people"); setShowAdminMenu(false); }}>Employees</button>
           <button onClick={() => { changeTab("jobs"); setShowAdminMenu(false); }}>Jobs</button>
           <button onClick={() => { changeTab("jobreports"); setShowAdminMenu(false); }}>Job hours</button>
+          <button onClick={() => { changeTab("jobcosts"); setShowAdminMenu(false); }}>Job costs</button>
           <button onClick={() => { changeTab("history"); setShowAdminMenu(false); }}>History & backup</button>
           <button onClick={() => { changeTab("account"); setShowAdminMenu(false); }}>Admin account</button>
         </div>
@@ -410,6 +423,7 @@ export default function TimeCardApp() {
        tab === "people" && isAdmin ? <People people={data.employees ?? []} archivedPeople={data.archivedEmployees ?? []} busy={busy} act={act} /> :
        tab === "jobs" && isAdmin ? <Jobs jobs={data.jobs ?? []} busy={busy} act={act} /> :
        tab === "jobreports" && isAdmin ? <JobHoursReport /> :
+       tab === "jobcosts" && isAdmin ? <JobCostsReport /> :
        tab === "jobreviews" && isAdmin ? <JobMismatchReviews busy={busy} act={act} /> :
        tab === "expenses" && isAdmin ? <Expenses jobs={data.jobs ?? []} /> :
        tab === "reports" ? <PayReports people={reportPeople} isAdmin={isAdmin} selectedWeek={week} /> :
@@ -473,6 +487,7 @@ function CommandCenter({ data, onNavigate, onUseClassic }: { data: Data; onNavig
       <button className="commandAction" onClick={() => onNavigate("timeoff")}><strong>Time off</strong><span>{pendingTimeOff ? `${pendingTimeOff} waiting for review` : "Review team availability"}</span>{pendingTimeOff > 0 && <b>{pendingTimeOff}</b>}</button>
       <button className="commandAction" onClick={() => onNavigate("jobreviews")}><strong>Job reviews</strong><span>{pendingJobReviews ? `${pendingJobReviews} possible mismatch${pendingJobReviews === 1 ? "" : "es"}` : "Check possible job mismatches"}</span>{pendingJobReviews > 0 && <b>{pendingJobReviews}</b>}</button>
       <button className="commandAction" onClick={() => onNavigate("expenses")}><strong>Expenses</strong><span>Capture receipts and review job costs</span></button>
+      <button className="commandAction" onClick={() => onNavigate("jobcosts")}><strong>Job costs</strong><span>Combine labor and expenses by job</span></button>
       <button className="commandAction" onClick={() => onNavigate("reports")}><strong>Pay reports</strong><span>Create or download pay records</span></button>
     </div>
 
@@ -846,7 +861,7 @@ const EXPENSE_CATEGORIES = ["Materials", "Fuel", "Equipment", "Subcontractor", "
 
 function Expenses({ jobs }: { jobs: Job[] }) {
   const activeOrUsedJobs = jobs;
-  const blank = useMemo(() => ({ id: 0, jobId: Number(activeOrUsedJobs.find((job) => Boolean(job.active))?.id ?? activeOrUsedJobs[0]?.id ?? 0), purchaseDate: today(), vendor: "", category: "Materials", amount: "", note: "", ocrText: "", reviewed: false }), [activeOrUsedJobs]);
+  const blank = useMemo(() => ({ id: 0, jobId: Number(activeOrUsedJobs.find((job) => Boolean(job.active))?.id ?? activeOrUsedJobs[0]?.id ?? 0), purchaseDate: today(), vendor: "", category: "Materials", amount: "", salesTax: "", note: "", ocrText: "", reviewed: false }), [activeOrUsedJobs]);
   const [draft, setDraft] = useState(blank);
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState("");
@@ -856,6 +871,10 @@ function Expenses({ jobs }: { jobs: Job[] }) {
   const [ocrBusy, setOcrBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [filterJob, setFilterJob] = useState(0);
+  const [filterCategory, setFilterCategory] = useState("all");
+  const [filterStart, setFilterStart] = useState("");
+  const [filterEnd, setFilterEnd] = useState("");
 
   const load = useCallback(async () => {
     try { setLoading(true); setError(""); setResult(await api(undefined, "?expenses=1") as ExpenseData); }
@@ -894,9 +913,20 @@ function Expenses({ jobs }: { jobs: Job[] }) {
     finally { setBusy(false); }
   };
   const edit = (expense: Expense) => {
-    setDraft({ id: expense.id, jobId: expense.jobId, purchaseDate: expense.purchaseDate, vendor: expense.vendor, category: expense.category, amount: String(expense.amount), note: expense.note, ocrText: expense.ocrText, reviewed: expense.reviewed });
+    setDraft({ id: expense.id, jobId: expense.jobId, purchaseDate: expense.purchaseDate, vendor: expense.vendor, category: expense.category, amount: String(expense.amount), salesTax: String(expense.salesTax || ""), note: expense.note, ocrText: expense.ocrText, reviewed: expense.reviewed });
     setFile(null); if (preview) URL.revokeObjectURL(preview); setPreview(""); window.scrollTo({ top: 0, behavior: "smooth" });
   };
+  const filteredExpenses = (result?.expenses ?? []).filter((expense) =>
+    (!filterJob || expense.jobId === filterJob) &&
+    (filterCategory === "all" || expense.category === filterCategory) &&
+    (!filterStart || expense.purchaseDate >= filterStart) && (!filterEnd || expense.purchaseDate <= filterEnd)
+  );
+  const filteredTotals = filteredExpenses.reduce((totals, expense) => ({
+    amount: totals.amount + Number(expense.amount), tax: totals.tax + Number(expense.salesTax || 0),
+  }), { amount: 0, tax: 0 });
+  const categoryTotals = [...filteredExpenses.reduce((map, expense) => {
+    const row = map.get(expense.category) ?? { amount: 0, tax: 0 }; row.amount += Number(expense.amount); row.tax += Number(expense.salesTax || 0); map.set(expense.category, row); return map;
+  }, new Map<string, { amount: number; tax: number }>()).entries()].sort((a, b) => b[1].amount - a[1].amount);
   const remove = async (expense: Expense) => {
     if (!window.confirm(`Delete this ${expense.vendor || "expense"}?`)) return;
     setBusy(true); setError("");
@@ -912,8 +942,9 @@ function Expenses({ jobs }: { jobs: Job[] }) {
       <form className="editorCard expenseEditor" onSubmit={(event) => void submit(event)}>
         <h3>{draft.id ? "Edit expense" : "New expense"}</h3>
         <label>Job<select value={draft.jobId} onChange={(event) => setDraft({ ...draft, jobId: Number(event.target.value) })} required><option value={0}>Choose a job…</option>{activeOrUsedJobs.map((job) => <option key={job.id} value={job.id}>{job.name}{!job.active ? " (complete)" : ""}</option>)}</select></label>
-        <div className="expenseFields"><label>Date<input type="date" value={draft.purchaseDate} onChange={(event) => setDraft({ ...draft, purchaseDate: event.target.value })} required /></label><label>Amount<span className="currencyField"><span aria-hidden="true">$</span><input inputMode="decimal" value={draft.amount} onChange={(event) => setDraft({ ...draft, amount: event.target.value.replace(/[^\d.]/g, "").replace(/(\..*)\./g, "$1") })} placeholder="0.00" required /></span></label></div>
+        <div className="expenseFields"><label>Date<input type="date" value={draft.purchaseDate} onChange={(event) => setDraft({ ...draft, purchaseDate: event.target.value })} required /></label><label>Receipt total<span className="currencyField"><span aria-hidden="true">$</span><input inputMode="decimal" value={draft.amount} onChange={(event) => setDraft({ ...draft, amount: event.target.value.replace(/[^\d.]/g, "").replace(/(\..*)\./g, "$1") })} placeholder="0.00" required /></span></label></div>
         <div className="expenseFields"><label>Vendor<input value={draft.vendor} onChange={(event) => setDraft({ ...draft, vendor: event.target.value })} placeholder="Store or supplier" /></label><label>Category<select value={draft.category} onChange={(event) => setDraft({ ...draft, category: event.target.value })}>{EXPENSE_CATEGORIES.map((category) => <option key={category}>{category}</option>)}</select></label></div>
+        <label>Sales tax <span className="optional">(included in receipt total)</span><span className="currencyField"><span aria-hidden="true">$</span><input inputMode="decimal" value={draft.salesTax} onChange={(event) => setDraft({ ...draft, salesTax: event.target.value.replace(/[^\d.]/g, "").replace(/(\..*)\./g, "$1") })} placeholder="0.00" /></span></label>
         <label>Receipt photo<input type="file" accept="image/*" capture="environment" onChange={(event) => void selectFile(event.target.files?.[0] ?? null)} /></label>
         {preview && <img className="receiptPreview" src={preview} alt="Receipt preview" />}
         <label>Extracted text <span className="optional">(review and correct)</span><textarea rows={7} value={draft.ocrText} onChange={(event) => setDraft({ ...draft, ocrText: event.target.value })} placeholder={ocrBusy ? "Reading receipt…" : "Text from the receipt will appear here. You can correct it before saving."} /></label>
@@ -921,8 +952,9 @@ function Expenses({ jobs }: { jobs: Job[] }) {
         <label className="expenseReviewCheck"><input type="checkbox" checked={draft.reviewed} onChange={(event) => setDraft({ ...draft, reviewed: event.target.checked })} /> <span>I reviewed the receipt text and details</span></label>
         <div className="editorActions"><button className="primary" disabled={busy || ocrBusy || !draft.jobId}>{busy ? "Saving…" : draft.id ? "Save changes" : "Save expense"}</button>{draft.id && <button type="button" className="secondary" onClick={reset}>Cancel edit</button>}</div>
       </form>
-      <div className="expenseList"><div className="expenseListHead"><div><span className="eyebrow">Receipt log</span><h3>{result?.expenses.length ?? 0} saved expense{result?.expenses.length === 1 ? "" : "s"}</h3></div>{result && <strong>{money(result.expenses.reduce((sum, expense) => sum + Number(expense.amount), 0))}</strong>}</div>
-        {loading ? <div className="reportEmpty"><div className="spinner" /><p>Loading expenses…</p></div> : !result?.expenses.length ? <div className="reportEmpty"><span aria-hidden="true">▧</span><h3>No expenses yet</h3><p>Snap the first receipt to start a job expense log.</p></div> : <div className="expenseCards">{result.expenses.map((expense) => <article className="expenseCard" key={expense.id}><div className="expenseCardHead"><div><h3>{expense.vendor || "Unnamed vendor"}</h3><span>{expense.jobName} · {reportDate(expense.purchaseDate)} · {expense.category}</span></div><strong>{money(Number(expense.amount))}</strong></div><div className="expenseStatus"><span className={expense.reviewed ? "status status-approved" : "status status-pending"}>{expense.reviewed ? "Reviewed" : "Needs review"}</span>{expense.hasReceipt && <a className="secondary" href={`/api/timecard?receiptImage=${expense.id}`} target="_blank" rel="noreferrer">Open receipt</a>}<button className="secondary" onClick={() => edit(expense)}>Edit</button><button className="danger" disabled={busy} onClick={() => void remove(expense)}>Delete</button></div>{expense.ocrText && <details><summary>Receipt text</summary><pre>{expense.ocrText}</pre></details>}{expense.note && <p className="expenseNote">{expense.note}</p>}</article>)}</div>}
+      <div className="expenseList"><div className="expenseListHead"><div><span className="eyebrow">Receipt log</span><h3>{filteredExpenses.length} shown · {result?.expenses.length ?? 0} saved expense{result?.expenses.length === 1 ? "" : "s"}</h3></div>{result && <strong>{money(filteredTotals.amount)}</strong>}</div>
+        <section className="expenseReport"><div className="sectionHead compactHead"><div><span className="eyebrow">Expense report</span><h3>Filter and total receipts</h3></div></div><div className="expenseFilters"><label>Job<select value={filterJob} onChange={(event) => setFilterJob(Number(event.target.value))}><option value={0}>All jobs</option>{activeOrUsedJobs.map((job) => <option key={job.id} value={job.id}>{job.name}</option>)}</select></label><label>Category<select value={filterCategory} onChange={(event) => setFilterCategory(event.target.value)}><option value="all">All categories</option>{EXPENSE_CATEGORIES.map((category) => <option key={category}>{category}</option>)}</select></label><label>From<input type="date" value={filterStart} onChange={(event) => setFilterStart(event.target.value)} /></label><label>To<input type="date" value={filterEnd} onChange={(event) => setFilterEnd(event.target.value)} /></label></div><div className="expenseTotals"><div><span>Receipts</span><strong>{money(filteredTotals.amount)}</strong></div><div><span>Before tax</span><strong>{money(filteredTotals.amount - filteredTotals.tax)}</strong></div><div><span>Sales tax</span><strong>{money(filteredTotals.tax)}</strong></div></div>{categoryTotals.length > 0 && <div className="expenseCategoryTotals"><strong>By category</strong>{categoryTotals.map(([category, totals]) => <div key={category}><span>{category}</span><span>{money(totals.amount)} <small>({money(totals.tax)} tax)</small></span></div>)}</div>}</section>
+        {loading ? <div className="reportEmpty"><div className="spinner" /><p>Loading expenses…</p></div> : !result?.expenses.length ? <div className="reportEmpty"><span aria-hidden="true">▧</span><h3>No expenses yet</h3><p>Snap the first receipt to start a job expense log.</p></div> : !filteredExpenses.length ? <div className="reportEmpty"><span aria-hidden="true">⌕</span><h3>No matching expenses</h3><p>Adjust the filters to see more receipts.</p></div> : <div className="expenseCards">{filteredExpenses.map((expense) => <article className="expenseCard" key={expense.id}><div className="expenseCardBody">{expense.hasReceipt && <a className="expenseThumbLink" href={`/api/timecard?receiptImage=${expense.id}`} target="_blank" rel="noreferrer"><img className="expenseThumb" src={`/api/timecard?receiptImage=${expense.id}`} alt={`${expense.vendor || "Receipt"} thumbnail`} /></a>}<div className="expenseCardContent"><div className="expenseCardHead"><div><h3>{expense.vendor || "Unnamed vendor"}</h3><span>{expense.jobName} · {reportDate(expense.purchaseDate)} · {expense.category}</span></div><strong>{money(Number(expense.amount))}</strong></div><div className="expenseStatus"><span className={expense.reviewed ? "status status-approved" : "status status-pending"}>{expense.reviewed ? "Reviewed" : "Needs review"}</span>{expense.hasReceipt && <a className="secondary" href={`/api/timecard?receiptImage=${expense.id}`} target="_blank" rel="noreferrer">Open receipt</a>}<button className="secondary" onClick={() => edit(expense)}>Edit</button><button className="danger" disabled={busy} onClick={() => void remove(expense)}>Delete</button></div>{expense.possibleDuplicate && <div className="expenseDuplicate">Possible duplicate of another receipt{expense.duplicateId ? ` (#${expense.duplicateId})` : ""}: same vendor, date, and amount.</div>}{expense.salesTax > 0 && <p className="expenseMeta">Sales tax: {money(Number(expense.salesTax))} · Before tax: {money(Number(expense.amount) - Number(expense.salesTax))}</p>}{expense.ocrText && <details><summary>Receipt text</summary><pre>{expense.ocrText}</pre></details>}{expense.note && <p className="expenseNote">{expense.note}</p>}</div></div></article>)}</div>}
       </div>
     </div>
   </section>;
@@ -954,6 +986,37 @@ function JobHoursReport() {
           </div>
         </article>) : <div className="empty compactEmpty"><p>No jobs have been added yet.</p></div>}
       </div>
+    </>}
+  </section>;
+}
+
+function JobCostsReport() {
+  const [report, setReport] = useState<JobCostReportData | null>(null);
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const generate = useCallback(async () => {
+    if ((startDate && !endDate) || (!startDate && endDate) || (startDate && endDate && endDate < startDate)) {
+      setError("Choose both dates, with the end date on or after the start date."); return;
+    }
+    setLoading(true); setError("");
+    try {
+      const params = new URLSearchParams({ report: "job-costs" });
+      if (startDate) params.set("startDate", startDate); if (endDate) params.set("endDate", endDate);
+      setReport(await api(undefined, `?${params.toString()}`) as JobCostReportData);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "The job-cost report could not be loaded."); }
+    finally { setLoading(false); }
+  }, [startDate, endDate]);
+  useEffect(() => { const timer = window.setTimeout(() => void generate(), 0); return () => window.clearTimeout(timer); }, [generate]);
+  const totals = report?.totals;
+  return <section>
+    <div className="sectionHead"><div><span className="eyebrow">Administration</span><h2>Job costs</h2><p className="sectionHint">Combine labor and receipts so you can see what each job actually costs.</p></div></div>
+    <div className="reportBuilder jobCostBuilder"><label>From<input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} /></label><label>To<input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} /></label><button className="primary generateReport" onClick={() => void generate()} disabled={loading}>{loading ? "Loading…" : "Refresh report"}</button></div>
+    {error && <div className="alert">{error}</div>}
+    {!report ? <div className="reportEmpty"><div className="spinner" /><p>Loading job costs…</p></div> : <>
+      <div className="jobCostTotals"><div><span>Total job cost</span><strong>{money(totals?.totalCost ?? 0)}</strong></div><div><span>Labor</span><strong>{money(totals?.laborCost ?? 0)}</strong></div><div><span>Expenses</span><strong>{money(totals?.expenses ?? 0)}</strong></div><div><span>Sales tax</span><strong>{money(totals?.salesTax ?? 0)}</strong></div><div><span>Hours</span><strong>{Number(totals?.hours ?? 0).toFixed(2)}</strong></div></div>
+      <div className="jobCostList">{report.jobs.map((job) => <article className={`jobCostCard ${job.active ? "" : "completedJobHours"}`} key={job.id}><header><div><h3>{job.name}</h3>{!job.active && <span className="jobStatus">Complete</span>}</div><strong>{money(job.totalCost)}</strong></header><div className="jobCostBreakdown"><span>{job.totalHours.toFixed(2)} labor hours · {money(job.laborCost)} labor</span><span>{money(job.expenseTotal)} expenses · {money(job.salesTax)} sales tax</span></div><div className="jobCostDetails"><div><strong>Who worked it</strong>{job.people.length ? job.people.map((person) => <div key={person.id}><span>{person.name}{person.archived ? " (removed)" : ""}</span><span>{person.hours.toFixed(2)} hrs · {money(person.laborCost)}</span></div>) : <p>No labor recorded.</p>}</div><div><strong>Expenses by category</strong>{job.expenseCategories.length ? job.expenseCategories.map((item) => <div key={item.category}><span>{item.category}</span><span>{money(item.amount)}</span></div>) : <p>No expenses recorded.</p>}</div></div></article>)}</div>
     </>}
   </section>;
 }

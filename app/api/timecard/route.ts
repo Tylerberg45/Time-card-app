@@ -259,11 +259,14 @@ async function ensureSchema() {
     `CREATE TABLE IF NOT EXISTS time_off_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, start_date TEXT NOT NULL, end_date TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', reviewed_by INTEGER REFERENCES users(id) ON DELETE SET NULL, review_note TEXT NOT NULL DEFAULT '', requested_at TEXT NOT NULL, reviewed_at TEXT, updated_at TEXT NOT NULL, reminder_notification_id TEXT, reminder_sent_at TEXT)`,
     `CREATE INDEX IF NOT EXISTS time_off_user_dates ON time_off_requests(user_id, start_date, end_date)`,
     `CREATE INDEX IF NOT EXISTS time_off_status_start ON time_off_requests(status, start_date)`,
-    `CREATE TABLE IF NOT EXISTS expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL REFERENCES jobs(id), created_by INTEGER NOT NULL REFERENCES users(id), purchase_date TEXT NOT NULL, vendor TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT 'Other', amount REAL NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT '', ocr_text TEXT NOT NULL DEFAULT '', reviewed INTEGER NOT NULL DEFAULT 0, receipt_key TEXT NOT NULL DEFAULT '', receipt_type TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL REFERENCES jobs(id), created_by INTEGER NOT NULL REFERENCES users(id), purchase_date TEXT NOT NULL, vendor TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT 'Other', amount REAL NOT NULL DEFAULT 0, sales_tax REAL NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT '', ocr_text TEXT NOT NULL DEFAULT '', reviewed INTEGER NOT NULL DEFAULT 0, receipt_key TEXT NOT NULL DEFAULT '', receipt_type TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
     `CREATE INDEX IF NOT EXISTS expenses_purchase_date ON expenses(purchase_date)`,
     `CREATE INDEX IF NOT EXISTS expenses_job_date ON expenses(job_id, purchase_date)`,
   ];
   await db.batch(statements.map((sql) => db.prepare(sql)));
+  // Version 30 created expenses before sales-tax tracking was added. D1 does not
+  // support ADD COLUMN IF NOT EXISTS, so an already-migrated column is ignored.
+  try { await db.prepare(`ALTER TABLE expenses ADD COLUMN sales_tax REAL NOT NULL DEFAULT 0`).run(); } catch { /* already present */ }
 }
 
 async function audit(
@@ -470,13 +473,19 @@ export async function GET(request: Request) {
       if (user.role !== "admin") return json({ error: "Administrator access required." }, 403);
       const expenses = (await database().prepare(
         `SELECT e.id, e.job_id AS jobId, j.name AS jobName, j.active AS jobActive, e.purchase_date AS purchaseDate,
-           e.vendor, e.category, e.amount, e.note, e.ocr_text AS ocrText, e.reviewed, e.receipt_key AS receiptKey,
-           e.receipt_type AS receiptType, e.created_at AS createdAt, e.updated_at AS updatedAt, u.name AS createdByName
+           e.vendor, e.category, e.amount, e.sales_tax AS salesTax, e.note, e.ocr_text AS ocrText, e.reviewed, e.receipt_key AS receiptKey,
+           e.receipt_type AS receiptType, e.created_at AS createdAt, e.updated_at AS updatedAt, u.name AS createdByName,
+           CASE WHEN trim(e.vendor) <> '' AND EXISTS (
+             SELECT 1 FROM expenses d WHERE d.id <> e.id AND d.purchase_date = e.purchase_date
+               AND lower(trim(d.vendor)) = lower(trim(e.vendor)) AND abs(d.amount - e.amount) < 0.005
+           ) THEN 1 ELSE 0 END AS possibleDuplicate,
+           (SELECT d.id FROM expenses d WHERE d.id <> e.id AND d.purchase_date = e.purchase_date
+             AND lower(trim(d.vendor)) = lower(trim(e.vendor)) AND abs(d.amount - e.amount) < 0.005 ORDER BY d.id LIMIT 1) AS duplicateId
          FROM expenses e JOIN jobs j ON j.id = e.job_id JOIN users u ON u.id = e.created_by
          ORDER BY e.purchase_date DESC, e.id DESC`
       ).all()).results as Array<Record<string, unknown>>;
       const jobs = (await database().prepare(`SELECT id, name, active FROM jobs ORDER BY active DESC, LOWER(name)`).all()).results;
-      return json({ expenses: expenses.map((expense) => ({ ...expense, reviewed: Boolean(expense.reviewed), hasReceipt: Boolean(expense.receiptKey) })), jobs });
+      return json({ expenses: expenses.map((expense) => ({ ...expense, reviewed: Boolean(expense.reviewed), hasReceipt: Boolean(expense.receiptKey), possibleDuplicate: Boolean(expense.possibleDuplicate), duplicateId: expense.duplicateId == null ? null : Number(expense.duplicateId) })), jobs });
     }
     if (url.searchParams.get("jobReviews") === "1") {
       if (user.role !== "admin") return json({ error: "Administrator access required." }, 403);
@@ -564,6 +573,54 @@ export async function GET(request: Request) {
       });
       return json({ jobs: [...jobs.values()] });
     }
+    if (url.searchParams.get("report") === "job-costs") {
+      if (user.role !== "admin") return json({ error: "Administrator access required." }, 403);
+      const startDate = url.searchParams.get("startDate") ?? "";
+      const endDate = url.searchParams.get("endDate") ?? "";
+      if ((startDate && !validDate(startDate)) || (endDate && !validDate(endDate)) || (startDate && endDate && endDate < startDate)) {
+        return json({ error: "Choose a valid date range." }, 400);
+      }
+      const [jobRows, laborRows, expenseRows] = await Promise.all([
+        database().prepare(`SELECT id, name, active FROM jobs ORDER BY active DESC, LOWER(name)`).all(),
+        database().prepare(
+          `SELECT t.job_id AS jobId, t.user_id AS userId, u.name AS employeeName, u.active AS userActive, t.hours,
+             COALESCE((SELECT r.rate FROM employee_pay_rates r WHERE r.user_id = t.user_id AND r.effective_from <= t.work_date ORDER BY r.effective_from DESC, r.id DESC LIMIT 1), u.hourly_rate) AS hourlyRate
+           FROM time_entries t JOIN users u ON u.id = t.user_id
+           WHERE (? = '' OR t.work_date >= ?) AND (? = '' OR t.work_date <= ?)`
+        ).bind(startDate, startDate, endDate, endDate).all(),
+        database().prepare(
+          `SELECT e.job_id AS jobId, e.category, e.amount, e.sales_tax AS salesTax
+           FROM expenses e WHERE (? = '' OR e.purchase_date >= ?) AND (? = '' OR e.purchase_date <= ?)`
+        ).bind(startDate, startDate, endDate, endDate).all(),
+      ]);
+      const jobs = (jobRows.results as Array<Record<string, unknown>>).map((job) => ({
+        id: Number(job.id), name: String(job.name), active: Boolean(job.active), totalHours: 0, laborCost: 0, expenseTotal: 0, salesTax: 0,
+        totalCost: 0, people: [] as Array<{ id: number; name: string; hours: number; laborCost: number; archived: boolean }>,
+        expenseCategories: [] as Array<{ category: string; amount: number; salesTax: number }>,
+      }));
+      const byJob = new Map(jobs.map((job) => [job.id, job]));
+      const byPerson = new Map<string, { id: number; name: string; hours: number; laborCost: number; archived: boolean }>();
+      for (const row of laborRows.results as Array<Record<string, unknown>>) {
+        const job = byJob.get(Number(row.jobId)); if (!job) continue;
+        const hours = Number(row.hours); const laborCost = hours * Number(row.hourlyRate);
+        job.totalHours += hours; job.laborCost += laborCost;
+        const personKey = `${job.id}:${Number(row.userId)}`;
+        const person = byPerson.get(personKey) ?? { id: Number(row.userId), name: String(row.employeeName), hours: 0, laborCost: 0, archived: !Boolean(row.userActive) };
+        person.hours += hours; person.laborCost += laborCost; byPerson.set(personKey, person);
+      }
+      for (const job of jobs) job.people = [...byPerson.entries()].filter(([key]) => key.startsWith(`${job.id}:`)).map(([, person]) => person).sort((a, b) => b.laborCost - a.laborCost);
+      const categories = new Map<string, { category: string; amount: number; salesTax: number }>();
+      for (const row of expenseRows.results as Array<Record<string, unknown>>) {
+        const job = byJob.get(Number(row.jobId)); if (!job) continue;
+        const amount = Number(row.amount); const salesTax = Number(row.salesTax);
+        job.expenseTotal += amount; job.salesTax += salesTax;
+        const category = String(row.category || "Other");
+        const item = categories.get(`${job.id}:${category}`) ?? { category, amount: 0, salesTax: 0 };
+        item.amount += amount; item.salesTax += salesTax; categories.set(`${job.id}:${category}`, item);
+      }
+      for (const job of jobs) { job.totalCost = job.laborCost + job.expenseTotal; job.expenseCategories = [...categories.entries()].filter(([key]) => key.startsWith(`${job.id}:`)).map(([, item]) => item).sort((a, b) => b.amount - a.amount); }
+      return json({ startDate, endDate, jobs, totals: { hours: jobs.reduce((sum, job) => sum + job.totalHours, 0), laborCost: jobs.reduce((sum, job) => sum + job.laborCost, 0), expenses: jobs.reduce((sum, job) => sum + job.expenseTotal, 0), salesTax: jobs.reduce((sum, job) => sum + job.salesTax, 0), totalCost: jobs.reduce((sum, job) => sum + job.totalCost, 0) } });
+    }
     const download = url.searchParams.get("download");
     if (download) {
       if (download === "csv") {
@@ -645,7 +702,7 @@ export async function GET(request: Request) {
           database().prepare(`SELECT id, user_id AS userId, rate, effective_from AS effectiveFrom, created_at AS createdAt FROM employee_pay_rates ORDER BY user_id, effective_from, id`).all(),
           database().prepare(`SELECT id, user_id AS userId, start_date AS startDate, end_date AS endDate, note, status, reviewed_by AS reviewedBy, review_note AS reviewNote, requested_at AS requestedAt, reviewed_at AS reviewedAt, updated_at AS updatedAt, reminder_sent_at AS reminderSentAt FROM time_off_requests ORDER BY start_date, id`).all(),
           database().prepare(`SELECT id, fingerprint, user_a_id AS userAId, user_b_id AS userBId, job_a_id AS jobAId, job_b_id AS jobBId, start_date AS startDate, end_date AS endDate, dates, entry_ids_a AS entryIdsA, entry_ids_b AS entryIdsB, hours_a AS hoursA, hours_b AS hoursB, confidence, status, reviewed_by AS reviewedBy, reviewed_at AS reviewedAt, selected_job_id AS selectedJobId, notification_id AS notificationId, notification_sent_at AS notificationSentAt, created_at AS createdAt, updated_at AS updatedAt FROM job_mismatch_reviews ORDER BY id`).all(),
-          database().prepare(`SELECT id, job_id AS jobId, created_by AS createdBy, purchase_date AS purchaseDate, vendor, category, amount, note, ocr_text AS ocrText, reviewed, receipt_key AS receiptKey, receipt_type AS receiptType, created_at AS createdAt, updated_at AS updatedAt FROM expenses ORDER BY purchase_date, id`).all(),
+          database().prepare(`SELECT id, job_id AS jobId, created_by AS createdBy, purchase_date AS purchaseDate, vendor, category, amount, sales_tax AS salesTax, note, ocr_text AS ocrText, reviewed, receipt_key AS receiptKey, receipt_type AS receiptType, created_at AS createdAt, updated_at AS updatedAt FROM expenses ORDER BY purchase_date, id`).all(),
           database().prepare(`SELECT id, actor_id AS actorId, actor_name AS actorName, action, target_type AS targetType, target_id AS targetId, summary, details, created_at AS createdAt FROM audit_log ORDER BY id`).all(),
         ]);
         const backup = JSON.stringify({
@@ -762,10 +819,11 @@ export async function POST(request: Request) {
       const vendor = String(body.vendor ?? "").trim().slice(0, 160);
       const category = String(body.category ?? "Other").trim().slice(0, 60) || "Other";
       const amount = Number(body.amount ?? 0);
+      const salesTax = Number(body.salesTax ?? 0);
       const note = String(body.note ?? "").trim().slice(0, 1000);
       const ocrText = String(body.ocrText ?? "").trim().slice(0, 20000);
       const reviewed = body.reviewed === true || body.reviewed === "true";
-      if (!jobId || !validDate(purchaseDate) || !Number.isFinite(amount) || amount < 0 || amount > 1_000_000) {
+      if (!jobId || !validDate(purchaseDate) || !Number.isFinite(amount) || amount < 0 || amount > 1_000_000 || !Number.isFinite(salesTax) || salesTax < 0 || salesTax > amount) {
         return json({ error: "Choose a job, a valid date, and a valid expense amount." }, 400);
       }
       const job = await database().prepare(`SELECT id, name FROM jobs WHERE id = ?`).bind(jobId).first<{ id: number; name: string }>();
@@ -786,12 +844,12 @@ export async function POST(request: Request) {
       let savedId = id;
       if (id) {
         await database().prepare(
-          `UPDATE expenses SET job_id = ?, purchase_date = ?, vendor = ?, category = ?, amount = ?, note = ?, ocr_text = ?, reviewed = ?, receipt_key = ?, receipt_type = ?, updated_at = ? WHERE id = ?`,
-        ).bind(jobId, purchaseDate, vendor, category, amount, note, ocrText, reviewed ? 1 : 0, receiptKey, receiptType, now, id).run();
+          `UPDATE expenses SET job_id = ?, purchase_date = ?, vendor = ?, category = ?, amount = ?, sales_tax = ?, note = ?, ocr_text = ?, reviewed = ?, receipt_key = ?, receipt_type = ?, updated_at = ? WHERE id = ?`,
+        ).bind(jobId, purchaseDate, vendor, category, amount, salesTax, note, ocrText, reviewed ? 1 : 0, receiptKey, receiptType, now, id).run();
       } else {
         await database().prepare(
-          `INSERT INTO expenses (job_id, created_by, purchase_date, vendor, category, amount, note, ocr_text, reviewed, receipt_key, receipt_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).bind(jobId, user.id, purchaseDate, vendor, category, amount, note, ocrText, reviewed ? 1 : 0, receiptKey, receiptType, now, now).run();
+          `INSERT INTO expenses (job_id, created_by, purchase_date, vendor, category, amount, sales_tax, note, ocr_text, reviewed, receipt_key, receipt_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(jobId, user.id, purchaseDate, vendor, category, amount, salesTax, note, ocrText, reviewed ? 1 : 0, receiptKey, receiptType, now, now).run();
         const saved = await database().prepare(`SELECT id FROM expenses WHERE created_by = ? ORDER BY id DESC LIMIT 1`).bind(user.id).first<{ id: number }>();
         savedId = Number(saved?.id ?? 0);
         if (receiptFile && receiptKey.includes("${")) {
@@ -802,7 +860,7 @@ export async function POST(request: Request) {
         const oldKey = String(before.receipt_key ?? before.receiptKey ?? "");
         if (oldKey) await receiptBucket()!.delete(oldKey);
       }
-      await audit(user, id ? "update" : "create", "expense", savedId, `${id ? "Updated" : "Added"} expense${vendor ? ` at ${vendor}` : ""} for ${job.name}`, { jobId, purchaseDate, vendor, category, amount, reviewed, hasReceipt: Boolean(receiptKey) });
+      await audit(user, id ? "update" : "create", "expense", savedId, `${id ? "Updated" : "Added"} expense${vendor ? ` at ${vendor}` : ""} for ${job.name}`, { jobId, purchaseDate, vendor, category, amount, salesTax, reviewed, hasReceipt: Boolean(receiptKey) });
       return json({ ok: true, id: savedId });
     }
 

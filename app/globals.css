@@ -223,6 +223,17 @@ h2 { margin-bottom:0; font-size:1.9rem; }
 .jobHoursPeople strong { flex:0 0 auto; color:var(--green); }
 .jobHoursPeople p { margin:8px 0 5px; color:var(--muted); font-size:.86rem; }
 .expenseLayout { display:grid; grid-template-columns:minmax(290px,.78fr) minmax(0,1.22fr); gap:18px; align-items:start; }
+.expenseReport { margin-bottom:16px; padding:16px; border:1px solid var(--line); border-radius:16px; background:#f5f8f5; }
+.compactHead { margin-bottom:12px; }
+.compactHead h3 { margin:0; }
+.expenseFilters { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; }
+.expenseTotals { display:grid; grid-template-columns:repeat(3,1fr); gap:1px; margin-top:14px; overflow:hidden; border:1px solid var(--line); border-radius:12px; background:var(--line); }
+.expenseTotals>div { display:grid; gap:5px; padding:12px; background:var(--paper); }
+.expenseTotals span,.expenseCategoryTotals>strong { color:var(--muted); font-size:.7rem; font-weight:900; letter-spacing:.05em; text-transform:uppercase; }
+.expenseTotals strong { color:var(--green); font-size:1.05rem; }
+.expenseCategoryTotals { display:grid; gap:7px; margin-top:14px; }
+.expenseCategoryTotals>div { display:flex; justify-content:space-between; gap:12px; padding-top:7px; border-top:1px solid var(--line); color:#405148; }
+.expenseCategoryTotals small { color:var(--muted); }
 .expenseEditor { position:sticky; top:18px; }
 .expenseEditor h3 { margin-bottom:2px; }
 .expenseFields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
@@ -237,6 +248,10 @@ h2 { margin-bottom:0; font-size:1.9rem; }
 .expenseListHead>strong { color:var(--green); font-size:1.25rem; }
 .expenseCards { display:grid; gap:11px; }
 .expenseCard { display:grid; gap:11px; padding:17px; border:1px solid var(--line); border-radius:16px; background:var(--paper); }
+.expenseCardBody { display:grid; grid-template-columns:86px minmax(0,1fr); gap:14px; }
+.expenseCardContent { min-width:0; display:grid; gap:11px; }
+.expenseThumbLink { display:block; width:86px; height:86px; overflow:hidden; border:1px solid var(--line); border-radius:10px; background:#f3f3ef; }
+.expenseThumb { width:100%; height:100%; object-fit:cover; }
 .expenseCardHead { display:flex; align-items:start; justify-content:space-between; gap:14px; }
 .expenseCardHead h3 { margin:0 0 5px; overflow-wrap:anywhere; }
 .expenseCardHead span { color:var(--muted); font-size:.82rem; }
@@ -248,6 +263,24 @@ h2 { margin-bottom:0; font-size:1.9rem; }
 .expenseCard summary { color:var(--green); cursor:pointer; font-size:.8rem; font-weight:800; }
 .expenseCard pre { max-height:180px; overflow:auto; margin:10px 0 0; padding:11px; border-radius:9px; background:#f3f4ef; color:#48564e; white-space:pre-wrap; font: .78rem/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }
 .expenseNote { margin:0; color:#45564c; font-size:.84rem; line-height:1.4; }
+.expenseMeta { margin:0; color:var(--muted); font-size:.8rem; }
+.expenseDuplicate { padding:9px 11px; border:1px solid #e5c67d; border-radius:9px; background:#fff7df; color:#805619; font-size:.8rem; font-weight:700; }
+.jobCostTotals { display:grid; grid-template-columns:repeat(5,1fr); gap:1px; margin-bottom:16px; overflow:hidden; border:1px solid var(--line); border-radius:16px; background:var(--line); }
+.jobCostTotals>div { display:grid; gap:6px; padding:15px; background:#f2f8f4; }
+.jobCostTotals span { color:var(--muted); font-size:.68rem; font-weight:900; letter-spacing:.05em; text-transform:uppercase; }
+.jobCostTotals strong { color:var(--green); font-size:1.15rem; }
+.jobCostList { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+.jobCostCard { overflow:hidden; border:1px solid var(--line); border-radius:16px; background:var(--paper); }
+.jobCostCard header { display:flex; align-items:center; justify-content:space-between; gap:14px; padding:17px 18px; border-bottom:1px solid var(--line); background:#f2f8f4; }
+.jobCostCard header>div { display:flex; align-items:center; flex-wrap:wrap; gap:8px; min-width:0; }
+.jobCostCard h3 { margin:0; overflow-wrap:anywhere; }
+.jobCostCard header>strong { color:var(--green); font-size:1.12rem; }
+.jobCostBreakdown { display:grid; gap:4px; padding:12px 18px; color:#405148; font-size:.82rem; border-bottom:1px solid var(--line); }
+.jobCostDetails { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; padding:14px 18px; }
+.jobCostDetails>div { display:grid; align-content:start; gap:7px; min-width:0; }
+.jobCostDetails>div>strong { color:var(--muted); font-size:.7rem; letter-spacing:.05em; text-transform:uppercase; }
+.jobCostDetails>div>div { display:flex; justify-content:space-between; gap:8px; padding-top:7px; border-top:1px solid #e8e9e4; color:#405148; font-size:.8rem; }
+.jobCostDetails p { margin:0; color:var(--muted); font-size:.82rem; }
 .completedJobHours header { background:#f3f3ef; }
 .jobStatus { padding:.28rem .5rem; border-radius:999px; background:#e3e4de; color:#657068; font-size:.65rem; font-weight:900; letter-spacing:.05em; text-transform:uppercase; }
 .jobReviewMessage { margin-bottom:16px; }
@@ -392,6 +425,9 @@ h2 { margin-bottom:0; font-size:1.9rem; }
   .reportActions { display:grid; }
   .reportActions>* { width:100%; }
   .jobHoursList { grid-template-columns:1fr; }
+  .jobCostList { grid-template-columns:1fr; }
+  .jobCostTotals { grid-template-columns:repeat(2,1fr); }
+  .expenseFilters { grid-template-columns:repeat(2,minmax(0,1fr)); }
   .expenseLayout { grid-template-columns:1fr; }
   .expenseEditor { position:static; }
   .moveEntry { grid-template-columns:1fr; }
@@ -423,8 +459,13 @@ h2 { margin-bottom:0; font-size:1.9rem; }
   .reportTableWrap { padding:8px 16px 16px; }
   .reportDisclaimer { padding:15px 16px 18px; }
   .jobHoursSummary,.jobHoursCard header { align-items:flex-start; }
+  .jobCostDetails { grid-template-columns:1fr; }
   .dateFields { grid-template-columns:1fr; }
   .expenseFields { grid-template-columns:1fr; }
+  .expenseFilters { grid-template-columns:1fr; }
+  .expenseTotals { grid-template-columns:1fr; }
+  .expenseCardBody { grid-template-columns:64px minmax(0,1fr); }
+  .expenseThumbLink { width:64px; height:64px; }
   .expenseStatus { align-items:stretch; }
   .expenseStatus .status { margin-right:0; }
   .expenseStatus button,.expenseStatus a { flex:1; text-align:center; }
