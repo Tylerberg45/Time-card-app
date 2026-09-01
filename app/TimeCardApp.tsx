@@ -24,6 +24,11 @@ type JobHoursReportData = {
     people: Array<{ id: number; name: string; hours: number; archived: boolean }>;
   }>;
 };
+type Expense = {
+  id: number; jobId: number; jobName: string; jobActive: number; purchaseDate: string; vendor: string; category: string;
+  amount: number; note: string; ocrText: string; reviewed: boolean; hasReceipt: boolean; receiptType?: string; createdByName: string;
+};
+type ExpenseData = { expenses: Expense[]; jobs: Job[] };
 type JobMismatchReview = {
   id: number;
   startDate: string;
@@ -69,6 +74,12 @@ const api = async (body?: Record<string, unknown>, query = "") => {
   const response = await fetch(`/api/timecard${query}`, body ? {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   } : { cache: "no-store" });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error ?? "Something went wrong.");
+  return data;
+};
+const apiForm = async (form: FormData) => {
+  const response = await fetch("/api/timecard", { method: "POST", body: form });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error ?? "Something went wrong.");
   return data;
@@ -139,6 +150,7 @@ const RELEASE_NOTES = {
     { audience: "admin", title: "Employee records stay safe", detail: "Removing an employee now hides their access without erasing time cards, pay history, or requests—and they can be restored." },
     { audience: "admin", title: "Automatic private backups", detail: "A private recovery backup is now created every day and retained for 45 days." },
     { audience: "admin", title: "Faster time-off review", detail: "Time-off alerts now open the exact request, with quick Approve and Deny actions where the phone supports them." },
+    { audience: "admin", title: "Receipt expense tracker", detail: "Capture receipt photos, assign expenses to jobs and categories, and review or correct the extracted text before saving." },
   ],
 };
 
@@ -148,7 +160,7 @@ const RELEASE_NOTES = {
 const BETA_HOME_DEFAULT = true;
 const BETA_HOME_STORAGE_PREFIX = "hazentime-home-mode:";
 type HomeMode = "beta" | "classic";
-type AppTab = "home" | "time" | "timeoff" | "people" | "jobs" | "jobreports" | "jobreviews" | "reports" | "history" | "account";
+type AppTab = "home" | "time" | "timeoff" | "people" | "jobs" | "jobreports" | "jobreviews" | "expenses" | "reports" | "history" | "account";
 
 export default function TimeCardApp() {
   const [data, setData] = useState<Data | null>(null);
@@ -367,6 +379,7 @@ export default function TimeCardApp() {
             <button className={tab === "jobs" ? "active" : ""} onClick={() => changeTab("jobs")}>Jobs</button>
             <button className={tab === "jobreports" ? "active" : ""} onClick={() => changeTab("jobreports")}>Job hours</button>
             <button className={tab === "jobreviews" ? "active" : ""} onClick={() => changeTab("jobreviews")}>Job reviews{Boolean(data.pendingJobReviewCount) && <span className="tabBadge">{data.pendingJobReviewCount}</span>}</button>
+            <button className={tab === "expenses" ? "active" : ""} onClick={() => changeTab("expenses")}>Expenses</button>
             <button className={tab === "history" ? "active" : ""} onClick={() => changeTab("history")}>History & backup</button>
             <button className={tab === "account" ? "active" : ""} onClick={() => changeTab("account")}>Admin account</button>
           </>}
@@ -379,6 +392,7 @@ export default function TimeCardApp() {
           <button onClick={() => { changeTab("timeoff"); setShowAdminMenu(false); }}>Time off{Boolean(data.pendingTimeOffCount) && <span className="tabBadge">{data.pendingTimeOffCount}</span>}</button>
           <button onClick={() => { changeTab("reports"); setShowAdminMenu(false); }}>Pay reports</button>
           <button onClick={() => { changeTab("jobreviews"); setShowAdminMenu(false); }}>Job reviews{Boolean(data.pendingJobReviewCount) && <span className="tabBadge">{data.pendingJobReviewCount}</span>}</button>
+          <button onClick={() => { changeTab("expenses"); setShowAdminMenu(false); }}>Expenses</button>
           <button onClick={() => { changeTab("people"); setShowAdminMenu(false); }}>Employees</button>
           <button onClick={() => { changeTab("jobs"); setShowAdminMenu(false); }}>Jobs</button>
           <button onClick={() => { changeTab("jobreports"); setShowAdminMenu(false); }}>Job hours</button>
@@ -397,6 +411,7 @@ export default function TimeCardApp() {
        tab === "jobs" && isAdmin ? <Jobs jobs={data.jobs ?? []} busy={busy} act={act} /> :
        tab === "jobreports" && isAdmin ? <JobHoursReport /> :
        tab === "jobreviews" && isAdmin ? <JobMismatchReviews busy={busy} act={act} /> :
+       tab === "expenses" && isAdmin ? <Expenses jobs={data.jobs ?? []} /> :
        tab === "reports" ? <PayReports people={reportPeople} isAdmin={isAdmin} selectedWeek={week} /> :
        tab === "history" && isAdmin ? <History week={week} employeeId={employeeId} /> :
        tab === "account" && isAdmin ? <AdminAccount name={data.user.name} busy={busy} act={act} /> :
@@ -457,6 +472,7 @@ function CommandCenter({ data, onNavigate, onUseClassic }: { data: Data; onNavig
       <button className="commandAction" onClick={() => onNavigate("time")}><strong>Time cards</strong><span>Review or correct hours</span></button>
       <button className="commandAction" onClick={() => onNavigate("timeoff")}><strong>Time off</strong><span>{pendingTimeOff ? `${pendingTimeOff} waiting for review` : "Review team availability"}</span>{pendingTimeOff > 0 && <b>{pendingTimeOff}</b>}</button>
       <button className="commandAction" onClick={() => onNavigate("jobreviews")}><strong>Job reviews</strong><span>{pendingJobReviews ? `${pendingJobReviews} possible mismatch${pendingJobReviews === 1 ? "" : "es"}` : "Check possible job mismatches"}</span>{pendingJobReviews > 0 && <b>{pendingJobReviews}</b>}</button>
+      <button className="commandAction" onClick={() => onNavigate("expenses")}><strong>Expenses</strong><span>Capture receipts and review job costs</span></button>
       <button className="commandAction" onClick={() => onNavigate("reports")}><strong>Pay reports</strong><span>Create or download pay records</span></button>
     </div>
 
@@ -823,6 +839,92 @@ function PayReports({ people, isAdmin, selectedWeek }: { people: Person[]; isAdm
       <div className="reportTableWrap"><table className="reportTable"><thead><tr><th>Week starting</th><th>Hours</th><th>Rate(s)</th><th>Gross pay</th><th>Payment</th></tr></thead><tbody>{weeks.length ? weeks.map((item) => <tr key={item.weekStart}><td>{reportDate(item.weekStart)}</td><td>{item.hours.toFixed(2)}</td><td>{rateLabel(item.rates)}</td><td>{money(item.pay)}</td><td>{paymentSummary(item)}</td></tr>) : <tr><td colSpan={5}>No hours recorded in this period.</td></tr>}</tbody></table></div>
       <p className="reportDisclaimer">This is an internal pay summary, not an official W-2 or 1099. The calculation automatically applies the stored hourly rate effective on each work date and should still be checked against issued payments before tax filing.</p>
     </div>}
+  </section>;
+}
+
+const EXPENSE_CATEGORIES = ["Materials", "Fuel", "Equipment", "Subcontractor", "Meals", "Office", "Travel", "Other"];
+
+function Expenses({ jobs }: { jobs: Job[] }) {
+  const activeOrUsedJobs = jobs;
+  const blank = useMemo(() => ({ id: 0, jobId: Number(activeOrUsedJobs.find((job) => Boolean(job.active))?.id ?? activeOrUsedJobs[0]?.id ?? 0), purchaseDate: today(), vendor: "", category: "Materials", amount: "", note: "", ocrText: "", reviewed: false }), [activeOrUsedJobs]);
+  const [draft, setDraft] = useState(blank);
+  const [file, setFile] = useState<File | null>(null);
+  const [preview, setPreview] = useState("");
+  const [result, setResult] = useState<ExpenseData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [ocrBusy, setOcrBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  const load = useCallback(async () => {
+    try { setLoading(true); setError(""); setResult(await api(undefined, "?expenses=1") as ExpenseData); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Could not load expenses."); }
+    finally { setLoading(false); }
+  }, []);
+  useEffect(() => { const timer = window.setTimeout(() => void load(), 0); return () => window.clearTimeout(timer); }, [load]);
+  useEffect(() => () => { if (preview) URL.revokeObjectURL(preview); }, [preview]);
+
+  const reset = () => { setDraft(blank); setFile(null); if (preview) URL.revokeObjectURL(preview); setPreview(""); };
+  const selectFile = async (selected: File | null) => {
+    setFile(selected); if (preview) URL.revokeObjectURL(preview); setPreview(selected ? URL.createObjectURL(selected) : "");
+    if (!selected) return;
+    setOcrBusy(true); setError(""); setMessage("Reading receipt text on this device…");
+    try {
+      const { createWorker } = await import("tesseract.js");
+      const worker = await createWorker("eng");
+      const recognized = await worker.recognize(selected);
+      await worker.terminate();
+      setDraft((current) => ({ ...current, ocrText: recognized.data.text.trim() }));
+      setMessage(recognized.data.text.trim() ? "Receipt text extracted. Review it before saving." : "No text was detected. You can enter the details manually.");
+    } catch (cause) {
+      setMessage("The photo is ready. Text extraction was unavailable, so enter or paste the details manually.");
+      if (cause instanceof Error) console.warn("Receipt OCR unavailable", cause.message);
+    } finally { setOcrBusy(false); }
+  };
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault(); setBusy(true); setError(""); setMessage("");
+    try {
+      const form = new FormData();
+      form.set("action", "saveExpense");
+      Object.entries(draft).forEach(([key, value]) => form.set(key, String(value)));
+      if (file) form.set("receipt", file, file.name);
+      await apiForm(form); setMessage(draft.id ? "Expense updated." : "Expense saved."); reset(); await load();
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "The expense could not be saved."); }
+    finally { setBusy(false); }
+  };
+  const edit = (expense: Expense) => {
+    setDraft({ id: expense.id, jobId: expense.jobId, purchaseDate: expense.purchaseDate, vendor: expense.vendor, category: expense.category, amount: String(expense.amount), note: expense.note, ocrText: expense.ocrText, reviewed: expense.reviewed });
+    setFile(null); if (preview) URL.revokeObjectURL(preview); setPreview(""); window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+  const remove = async (expense: Expense) => {
+    if (!window.confirm(`Delete this ${expense.vendor || "expense"}?`)) return;
+    setBusy(true); setError("");
+    try { await api({ action: "deleteExpense", id: expense.id }); setMessage("Expense deleted."); await load(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "The expense could not be deleted."); }
+    finally { setBusy(false); }
+  };
+
+  return <section>
+    <div className="sectionHead"><div><span className="eyebrow">Administration</span><h2>Expenses</h2><p className="sectionHint">Snap a receipt, assign it to a job, and review the extracted text before you mark it accurate.</p></div></div>
+    {error && <div className="alert">{error}</div>}{message && <div className="successMessage">{message}</div>}
+    <div className="expenseLayout">
+      <form className="editorCard expenseEditor" onSubmit={(event) => void submit(event)}>
+        <h3>{draft.id ? "Edit expense" : "New expense"}</h3>
+        <label>Job<select value={draft.jobId} onChange={(event) => setDraft({ ...draft, jobId: Number(event.target.value) })} required><option value={0}>Choose a job…</option>{activeOrUsedJobs.map((job) => <option key={job.id} value={job.id}>{job.name}{!job.active ? " (complete)" : ""}</option>)}</select></label>
+        <div className="expenseFields"><label>Date<input type="date" value={draft.purchaseDate} onChange={(event) => setDraft({ ...draft, purchaseDate: event.target.value })} required /></label><label>Amount<span className="currencyField"><span aria-hidden="true">$</span><input inputMode="decimal" value={draft.amount} onChange={(event) => setDraft({ ...draft, amount: event.target.value.replace(/[^\d.]/g, "").replace(/(\..*)\./g, "$1") })} placeholder="0.00" required /></span></label></div>
+        <div className="expenseFields"><label>Vendor<input value={draft.vendor} onChange={(event) => setDraft({ ...draft, vendor: event.target.value })} placeholder="Store or supplier" /></label><label>Category<select value={draft.category} onChange={(event) => setDraft({ ...draft, category: event.target.value })}>{EXPENSE_CATEGORIES.map((category) => <option key={category}>{category}</option>)}</select></label></div>
+        <label>Receipt photo<input type="file" accept="image/*" capture="environment" onChange={(event) => void selectFile(event.target.files?.[0] ?? null)} /></label>
+        {preview && <img className="receiptPreview" src={preview} alt="Receipt preview" />}
+        <label>Extracted text <span className="optional">(review and correct)</span><textarea rows={7} value={draft.ocrText} onChange={(event) => setDraft({ ...draft, ocrText: event.target.value })} placeholder={ocrBusy ? "Reading receipt…" : "Text from the receipt will appear here. You can correct it before saving."} /></label>
+        <label>Notes <span className="optional">(optional)</span><textarea rows={3} value={draft.note} onChange={(event) => setDraft({ ...draft, note: event.target.value })} placeholder="Why it was purchased or anything Corbin should remember" /></label>
+        <label className="expenseReviewCheck"><input type="checkbox" checked={draft.reviewed} onChange={(event) => setDraft({ ...draft, reviewed: event.target.checked })} /> <span>I reviewed the receipt text and details</span></label>
+        <div className="editorActions"><button className="primary" disabled={busy || ocrBusy || !draft.jobId}>{busy ? "Saving…" : draft.id ? "Save changes" : "Save expense"}</button>{draft.id && <button type="button" className="secondary" onClick={reset}>Cancel edit</button>}</div>
+      </form>
+      <div className="expenseList"><div className="expenseListHead"><div><span className="eyebrow">Receipt log</span><h3>{result?.expenses.length ?? 0} saved expense{result?.expenses.length === 1 ? "" : "s"}</h3></div>{result && <strong>{money(result.expenses.reduce((sum, expense) => sum + Number(expense.amount), 0))}</strong>}</div>
+        {loading ? <div className="reportEmpty"><div className="spinner" /><p>Loading expenses…</p></div> : !result?.expenses.length ? <div className="reportEmpty"><span aria-hidden="true">▧</span><h3>No expenses yet</h3><p>Snap the first receipt to start a job expense log.</p></div> : <div className="expenseCards">{result.expenses.map((expense) => <article className="expenseCard" key={expense.id}><div className="expenseCardHead"><div><h3>{expense.vendor || "Unnamed vendor"}</h3><span>{expense.jobName} · {reportDate(expense.purchaseDate)} · {expense.category}</span></div><strong>{money(Number(expense.amount))}</strong></div><div className="expenseStatus"><span className={expense.reviewed ? "status status-approved" : "status status-pending"}>{expense.reviewed ? "Reviewed" : "Needs review"}</span>{expense.hasReceipt && <a className="secondary" href={`/api/timecard?receiptImage=${expense.id}`} target="_blank" rel="noreferrer">Open receipt</a>}<button className="secondary" onClick={() => edit(expense)}>Edit</button><button className="danger" disabled={busy} onClick={() => void remove(expense)}>Delete</button></div>{expense.ocrText && <details><summary>Receipt text</summary><pre>{expense.ocrText}</pre></details>}{expense.note && <p className="expenseNote">{expense.note}</p>}</article>)}</div>}
+      </div>
+    </div>
   </section>;
 }
 

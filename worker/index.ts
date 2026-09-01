@@ -196,7 +196,7 @@ async function createDailyBackup(env: Env, scheduledTime: number) {
   const key = `daily/${localDate}.json`;
   if (await env.BACKUPS.head(key)) return;
 
-  const [users, jobs, entries, payWeeks, payRateHistory, timeOff, jobMismatchReviews, history] = await Promise.all([
+  const [users, jobs, entries, payWeeks, payRateHistory, timeOff, jobMismatchReviews, expenses, history] = await Promise.all([
     env.DB.prepare(`SELECT id, name, phone, role, pin_hash AS pinHash, pin_salt AS pinSalt, hourly_rate AS hourlyRate, active, created_at AS createdAt FROM users ORDER BY id`).all(),
     env.DB.prepare(`SELECT id, name, active, created_at AS createdAt FROM jobs ORDER BY id`).all(),
     env.DB.prepare(`SELECT id, user_id AS userId, job_id AS jobId, work_date AS workDate, hours, note, flagged, flag_reason AS flagReason, resolution, resolved, updated_at AS updatedAt FROM time_entries ORDER BY work_date, id`).all(),
@@ -204,6 +204,7 @@ async function createDailyBackup(env: Env, scheduledTime: number) {
     env.DB.prepare(`SELECT id, user_id AS userId, rate, effective_from AS effectiveFrom, created_at AS createdAt FROM employee_pay_rates ORDER BY user_id, effective_from, id`).all(),
     env.DB.prepare(`SELECT id, user_id AS userId, start_date AS startDate, end_date AS endDate, note, status, reviewed_by AS reviewedBy, review_note AS reviewNote, requested_at AS requestedAt, reviewed_at AS reviewedAt, updated_at AS updatedAt, reminder_notification_id AS reminderNotificationId, reminder_sent_at AS reminderSentAt FROM time_off_requests ORDER BY start_date, id`).all(),
     env.DB.prepare(`SELECT id, fingerprint, user_a_id AS userAId, user_b_id AS userBId, job_a_id AS jobAId, job_b_id AS jobBId, start_date AS startDate, end_date AS endDate, dates, entry_ids_a AS entryIdsA, entry_ids_b AS entryIdsB, hours_a AS hoursA, hours_b AS hoursB, confidence, status, reviewed_by AS reviewedBy, reviewed_at AS reviewedAt, selected_job_id AS selectedJobId, notification_id AS notificationId, notification_sent_at AS notificationSentAt, created_at AS createdAt, updated_at AS updatedAt FROM job_mismatch_reviews ORDER BY id`).all(),
+    env.DB.prepare(`SELECT id, job_id AS jobId, created_by AS createdBy, purchase_date AS purchaseDate, vendor, category, amount, note, ocr_text AS ocrText, reviewed, receipt_key AS receiptKey, receipt_type AS receiptType, created_at AS createdAt, updated_at AS updatedAt FROM expenses ORDER BY purchaseDate, id`).all(),
     env.DB.prepare(`SELECT id, actor_id AS actorId, actor_name AS actorName, action, target_type AS targetType, target_id AS targetId, summary, details, created_at AS createdAt FROM audit_log ORDER BY id`).all(),
   ]);
   await env.BACKUPS.put(key, JSON.stringify({
@@ -216,6 +217,7 @@ async function createDailyBackup(env: Env, scheduledTime: number) {
     payRateHistory: payRateHistory.results,
     timeOffRequests: timeOff.results,
     jobMismatchReviews: jobMismatchReviews.results,
+    expenses: expenses.results,
     auditLog: history.results,
   }), {
     httpMetadata: { contentType: "application/json" },
@@ -237,9 +239,11 @@ const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const globals = globalThis as typeof globalThis & {
       __TIME_CARD_DB?: D1Database;
+      __TIME_CARD_BACKUPS?: R2Bucket;
       __TIME_CARD_PUSH?: { appId?: string; apiKey?: string; safariWebId?: string };
     };
     globals.__TIME_CARD_DB = env.DB;
+    globals.__TIME_CARD_BACKUPS = env.BACKUPS;
     globals.__TIME_CARD_PUSH = {
       appId: env.ONESIGNAL_APP_ID,
       apiKey: env.ONESIGNAL_API_KEY,

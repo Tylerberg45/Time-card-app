@@ -16,6 +16,10 @@ function database() {
   return db;
 }
 
+function receiptBucket() {
+  return (globalThis as typeof globalThis & { __TIME_CARD_BACKUPS?: R2Bucket }).__TIME_CARD_BACKUPS;
+}
+
 function pushConfig() {
   const config = (globalThis as typeof globalThis & {
     __TIME_CARD_PUSH?: { appId?: string; apiKey?: string; safariWebId?: string };
@@ -255,6 +259,9 @@ async function ensureSchema() {
     `CREATE TABLE IF NOT EXISTS time_off_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, start_date TEXT NOT NULL, end_date TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending', reviewed_by INTEGER REFERENCES users(id) ON DELETE SET NULL, review_note TEXT NOT NULL DEFAULT '', requested_at TEXT NOT NULL, reviewed_at TEXT, updated_at TEXT NOT NULL, reminder_notification_id TEXT, reminder_sent_at TEXT)`,
     `CREATE INDEX IF NOT EXISTS time_off_user_dates ON time_off_requests(user_id, start_date, end_date)`,
     `CREATE INDEX IF NOT EXISTS time_off_status_start ON time_off_requests(status, start_date)`,
+    `CREATE TABLE IF NOT EXISTS expenses (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL REFERENCES jobs(id), created_by INTEGER NOT NULL REFERENCES users(id), purchase_date TEXT NOT NULL, vendor TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT 'Other', amount REAL NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT '', ocr_text TEXT NOT NULL DEFAULT '', reviewed INTEGER NOT NULL DEFAULT 0, receipt_key TEXT NOT NULL DEFAULT '', receipt_type TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+    `CREATE INDEX IF NOT EXISTS expenses_purchase_date ON expenses(purchase_date)`,
+    `CREATE INDEX IF NOT EXISTS expenses_job_date ON expenses(job_id, purchase_date)`,
   ];
   await db.batch(statements.map((sql) => db.prepare(sql)));
 }
@@ -443,6 +450,34 @@ export async function GET(request: Request) {
       // A review scan must never stop normal time-card access.
       console.error("Job mismatch scan failed", error);
     }
+    if (url.searchParams.get("receiptImage")) {
+      if (user.role !== "admin") return json({ error: "Administrator access required." }, 403);
+      const id = Number(url.searchParams.get("receiptImage"));
+      if (!id) return json({ error: "Receipt not found." }, 404);
+      const expense = await database().prepare(`SELECT receipt_key AS receiptKey, receipt_type AS receiptType FROM expenses WHERE id = ?`).bind(id).first<{ receiptKey: string; receiptType: string }>();
+      const bucket = receiptBucket();
+      if (!expense?.receiptKey || !bucket) return json({ error: "Receipt not found." }, 404);
+      const object = await bucket.get(expense.receiptKey);
+      if (!object) return json({ error: "Receipt not found." }, 404);
+      return new Response(object.body, {
+        headers: {
+          "Content-Type": expense.receiptType || object.httpMetadata?.contentType || "image/jpeg",
+          "Cache-Control": "private, no-store",
+        },
+      });
+    }
+    if (url.searchParams.get("expenses") === "1") {
+      if (user.role !== "admin") return json({ error: "Administrator access required." }, 403);
+      const expenses = (await database().prepare(
+        `SELECT e.id, e.job_id AS jobId, j.name AS jobName, j.active AS jobActive, e.purchase_date AS purchaseDate,
+           e.vendor, e.category, e.amount, e.note, e.ocr_text AS ocrText, e.reviewed, e.receipt_key AS receiptKey,
+           e.receipt_type AS receiptType, e.created_at AS createdAt, e.updated_at AS updatedAt, u.name AS createdByName
+         FROM expenses e JOIN jobs j ON j.id = e.job_id JOIN users u ON u.id = e.created_by
+         ORDER BY e.purchase_date DESC, e.id DESC`
+      ).all()).results as Array<Record<string, unknown>>;
+      const jobs = (await database().prepare(`SELECT id, name, active FROM jobs ORDER BY active DESC, LOWER(name)`).all()).results;
+      return json({ expenses: expenses.map((expense) => ({ ...expense, reviewed: Boolean(expense.reviewed), hasReceipt: Boolean(expense.receiptKey) })), jobs });
+    }
     if (url.searchParams.get("jobReviews") === "1") {
       if (user.role !== "admin") return json({ error: "Administrator access required." }, 403);
       const reviews = (await database().prepare(
@@ -602,7 +637,7 @@ export async function GET(request: Request) {
       }
       if (download === "backup") {
         if (user.role !== "admin") return json({ error: "Administrator access required." }, 403);
-        const [users, jobs, entries, payWeeks, payRateHistory, timeOff, jobMismatchReviews, history] = await Promise.all([
+        const [users, jobs, entries, payWeeks, payRateHistory, timeOff, jobMismatchReviews, expenses, history] = await Promise.all([
           database().prepare(`SELECT id, name, phone, role, hourly_rate AS hourlyRate, active, created_at AS createdAt FROM users ORDER BY id`).all(),
           database().prepare(`SELECT id, name, active, created_at AS createdAt FROM jobs ORDER BY id`).all(),
           database().prepare(`SELECT id, user_id AS userId, job_id AS jobId, work_date AS workDate, hours, note, flagged, flag_reason AS flagReason, resolution, resolved, updated_at AS updatedAt FROM time_entries ORDER BY work_date, id`).all(),
@@ -610,12 +645,13 @@ export async function GET(request: Request) {
           database().prepare(`SELECT id, user_id AS userId, rate, effective_from AS effectiveFrom, created_at AS createdAt FROM employee_pay_rates ORDER BY user_id, effective_from, id`).all(),
           database().prepare(`SELECT id, user_id AS userId, start_date AS startDate, end_date AS endDate, note, status, reviewed_by AS reviewedBy, review_note AS reviewNote, requested_at AS requestedAt, reviewed_at AS reviewedAt, updated_at AS updatedAt, reminder_sent_at AS reminderSentAt FROM time_off_requests ORDER BY start_date, id`).all(),
           database().prepare(`SELECT id, fingerprint, user_a_id AS userAId, user_b_id AS userBId, job_a_id AS jobAId, job_b_id AS jobBId, start_date AS startDate, end_date AS endDate, dates, entry_ids_a AS entryIdsA, entry_ids_b AS entryIdsB, hours_a AS hoursA, hours_b AS hoursB, confidence, status, reviewed_by AS reviewedBy, reviewed_at AS reviewedAt, selected_job_id AS selectedJobId, notification_id AS notificationId, notification_sent_at AS notificationSentAt, created_at AS createdAt, updated_at AS updatedAt FROM job_mismatch_reviews ORDER BY id`).all(),
+          database().prepare(`SELECT id, job_id AS jobId, created_by AS createdBy, purchase_date AS purchaseDate, vendor, category, amount, note, ocr_text AS ocrText, reviewed, receipt_key AS receiptKey, receipt_type AS receiptType, created_at AS createdAt, updated_at AS updatedAt FROM expenses ORDER BY purchase_date, id`).all(),
           database().prepare(`SELECT id, actor_id AS actorId, actor_name AS actorName, action, target_type AS targetType, target_id AS targetId, summary, details, created_at AS createdAt FROM audit_log ORDER BY id`).all(),
         ]);
         const backup = JSON.stringify({
           format: "time-card-backup-v3",
           exportedAt: new Date().toISOString(),
-          users: users.results, jobs: jobs.results, timeEntries: entries.results, payWeeks: payWeeks.results, payRateHistory: payRateHistory.results, timeOffRequests: timeOff.results, jobMismatchReviews: jobMismatchReviews.results, auditLog: history.results,
+          users: users.results, jobs: jobs.results, timeEntries: entries.results, payWeeks: payWeeks.results, payRateHistory: payRateHistory.results, timeOffRequests: timeOff.results, jobMismatchReviews: jobMismatchReviews.results, expenses: expenses.results, auditLog: history.results,
         }, null, 2);
         return new Response(backup, {
           headers: {
@@ -644,7 +680,18 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     await ensureSchema();
-    const body = (await request.json()) as Payload;
+    let body: Payload;
+    let receiptFile: File | null = null;
+    if ((request.headers.get("content-type") ?? "").includes("multipart/form-data")) {
+      const form = await request.formData();
+      body = {};
+      for (const [key, value] of form.entries()) {
+        if (key === "receipt" && value instanceof File) receiptFile = value;
+        else if (typeof value === "string") body[key] = value;
+      }
+    } else {
+      body = (await request.json()) as Payload;
+    }
     const action = String(body.action ?? "");
     const now = new Date().toISOString();
 
@@ -706,6 +753,69 @@ export async function POST(request: Request) {
 
     const user = await requireUser(request);
     if (!user) return json({ error: "Please sign in again." }, 401);
+
+    if (action === "saveExpense") {
+      if (user.role !== "admin") return json({ error: "Administrator access required." }, 403);
+      const id = Number(body.id ?? 0);
+      const jobId = Number(body.jobId ?? 0);
+      const purchaseDate = String(body.purchaseDate ?? "");
+      const vendor = String(body.vendor ?? "").trim().slice(0, 160);
+      const category = String(body.category ?? "Other").trim().slice(0, 60) || "Other";
+      const amount = Number(body.amount ?? 0);
+      const note = String(body.note ?? "").trim().slice(0, 1000);
+      const ocrText = String(body.ocrText ?? "").trim().slice(0, 20000);
+      const reviewed = body.reviewed === true || body.reviewed === "true";
+      if (!jobId || !validDate(purchaseDate) || !Number.isFinite(amount) || amount < 0 || amount > 1_000_000) {
+        return json({ error: "Choose a job, a valid date, and a valid expense amount." }, 400);
+      }
+      const job = await database().prepare(`SELECT id, name FROM jobs WHERE id = ?`).bind(jobId).first<{ id: number; name: string }>();
+      if (!job) return json({ error: "That job no longer exists." }, 404);
+      const before = id ? await database().prepare(`SELECT * FROM expenses WHERE id = ?`).bind(id).first<Record<string, unknown>>() : null;
+      if (id && !before) return json({ error: "Expense not found." }, 404);
+      let receiptKey = String(before?.receipt_key ?? before?.receiptKey ?? "");
+      let receiptType = String(before?.receipt_type ?? before?.receiptType ?? "");
+      if (receiptFile) {
+        if (!receiptFile.type.startsWith("image/")) return json({ error: "Receipt must be an image." }, 400);
+        if (receiptFile.size > 8 * 1024 * 1024) return json({ error: "Receipt images must be 8 MB or smaller." }, 413);
+        if (!receiptBucket()) return json({ error: "Receipt storage is not available yet." }, 503);
+        const extension = (receiptFile.type.split("/")[1] || "jpg").replace(/[^a-z0-9]/gi, "").slice(0, 8) || "jpg";
+        receiptKey = `receipts/${id || crypto.randomUUID()}.${extension}`;
+        receiptType = receiptFile.type;
+        await receiptBucket()!.put(receiptKey, await receiptFile.arrayBuffer(), { httpMetadata: { contentType: receiptType } });
+      }
+      let savedId = id;
+      if (id) {
+        await database().prepare(
+          `UPDATE expenses SET job_id = ?, purchase_date = ?, vendor = ?, category = ?, amount = ?, note = ?, ocr_text = ?, reviewed = ?, receipt_key = ?, receipt_type = ?, updated_at = ? WHERE id = ?`,
+        ).bind(jobId, purchaseDate, vendor, category, amount, note, ocrText, reviewed ? 1 : 0, receiptKey, receiptType, now, id).run();
+      } else {
+        await database().prepare(
+          `INSERT INTO expenses (job_id, created_by, purchase_date, vendor, category, amount, note, ocr_text, reviewed, receipt_key, receipt_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(jobId, user.id, purchaseDate, vendor, category, amount, note, ocrText, reviewed ? 1 : 0, receiptKey, receiptType, now, now).run();
+        const saved = await database().prepare(`SELECT id FROM expenses WHERE created_by = ? ORDER BY id DESC LIMIT 1`).bind(user.id).first<{ id: number }>();
+        savedId = Number(saved?.id ?? 0);
+        if (receiptFile && receiptKey.includes("${")) {
+          // No-op: UUID keys are already unique; this branch exists only to keep key generation explicit.
+        }
+      }
+      if (receiptFile && id && before && receiptKey !== String(before.receipt_key ?? before.receiptKey ?? "") && receiptBucket()) {
+        const oldKey = String(before.receipt_key ?? before.receiptKey ?? "");
+        if (oldKey) await receiptBucket()!.delete(oldKey);
+      }
+      await audit(user, id ? "update" : "create", "expense", savedId, `${id ? "Updated" : "Added"} expense${vendor ? ` at ${vendor}` : ""} for ${job.name}`, { jobId, purchaseDate, vendor, category, amount, reviewed, hasReceipt: Boolean(receiptKey) });
+      return json({ ok: true, id: savedId });
+    }
+
+    if (action === "deleteExpense") {
+      if (user.role !== "admin") return json({ error: "Administrator access required." }, 403);
+      const id = Number(body.id ?? 0);
+      const before = await database().prepare(`SELECT id, vendor, receipt_key AS receiptKey FROM expenses WHERE id = ?`).bind(id).first<{ id: number; vendor: string; receiptKey: string }>();
+      if (!before) return json({ error: "Expense not found." }, 404);
+      await database().prepare(`DELETE FROM expenses WHERE id = ?`).bind(id).run();
+      if (before.receiptKey && receiptBucket()) await receiptBucket()!.delete(before.receiptKey);
+      await audit(user, "delete", "expense", id, `Removed expense${before.vendor ? ` at ${before.vendor}` : ""}`, { before });
+      return json({ ok: true });
+    }
 
     if (action === "requestTimeOff") {
       if (user.role !== "employee") return json({ error: "Employee access required to submit a request." }, 403);

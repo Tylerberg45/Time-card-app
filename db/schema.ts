@@ -149,3 +149,24 @@ export const jobMismatchReviews = sqliteTable(
     index("job_mismatch_status_start").on(table.status, table.startDate),
   ],
 );
+
+export const expenses = sqliteTable(
+  "expenses",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    jobId: integer("job_id").notNull().references(() => jobs.id),
+    createdBy: integer("created_by").notNull().references(() => users.id),
+    purchaseDate: text("purchase_date").notNull(),
+    vendor: text("vendor").notNull().default(""),
+    category: text("category").notNull().default("Other"),
+    amount: real("amount").notNull().default(0),
+    note: text("note").notNull().default(""),
+    ocrText: text("ocr_text").notNull().default(""),
+    reviewed: integer("reviewed", { mode: "boolean" }).notNull().default(false),
+    receiptKey: text("receipt_key").notNull().default(""),
+    receiptType: text("receipt_type").notNull().default(""),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (table) => [index("expenses_purchase_date").on(table.purchaseDate), index("expenses_job_date").on(table.jobId, table.purchaseDate)],
+);

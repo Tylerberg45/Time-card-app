@@ -130,6 +130,24 @@ test("gives administrators an all-time job-hours report with employee breakdowns
   assert.match(apiSource, /GROUP BY j\.id, j\.name, j\.active, u\.id, u\.name, u\.active/);
 });
 
+test("adds an admin receipt expense tracker with private images and OCR review", async () => {
+  const appSource = await readFile(new URL("../app/TimeCardApp.tsx", import.meta.url), "utf8");
+  const apiSource = await readFile(new URL("../app/api/timecard/route.ts", import.meta.url), "utf8");
+  const schema = await readFile(new URL("../db/schema.ts", import.meta.url), "utf8");
+  const workerSource = await readFile(new URL("../worker/index.ts", import.meta.url), "utf8");
+
+  assert.match(schema, /export const expenses/);
+  assert.match(appSource, />Expenses</);
+  assert.match(appSource, /Receipt photo/);
+  assert.match(appSource, /Extracted text/);
+  assert.match(appSource, /createWorker\("eng"\)/);
+  assert.match(apiSource, /if \(action === "saveExpense"\)/);
+  assert.match(apiSource, /receiptFile\.arrayBuffer\(\)/);
+  assert.match(apiSource, /receiptImage/);
+  assert.match(apiSource, /Administrator access required/);
+  assert.match(workerSource, /expenses: expenses\.results/);
+});
+
 test("completes jobs without losing hours and lets administrators move entries", async () => {
   const appSource = await readFile(new URL("../app/TimeCardApp.tsx", import.meta.url), "utf8");
   const apiSource = await readFile(new URL("../app/api/timecard/route.ts", import.meta.url), "utf8");
