@@ -133,8 +133,8 @@ const shiftMonth = (value: string, amount: number) => {
 
 // Change this version and update the items whenever a user-facing release ships.
 const RELEASE_NOTES = {
-  version: "2026.08.21.4",
-  date: "August 21, 2026",
+  version: "2026.09.01.1",
+  date: "September 1, 2026",
   items: [
     { audience: "all", title: "Calendar-style time cards", detail: "Tap a day, enter or edit time, save it, and see the hours right in the calendar." },
     { audience: "all", title: "Time-off calendar", detail: "Request days off in the app, see their status, and let Corbin approve or deny requests." },
