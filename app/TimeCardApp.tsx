@@ -353,6 +353,7 @@ export default function TimeCardApp() {
           <button className="primary whatsNewDone" onClick={dismissWhatsNew}>Got it</button>
         </section>
       </div>}
+      <div className={isAdmin ? "adminNavArea" : "navArea"}>
       <nav className={`tabs ${isAdmin && homeMode === "beta" ? "betaTabs" : ""}`}>
         {isAdmin && homeMode === "beta" ? <>
           <button className={tab === "home" ? "active" : ""} onClick={() => changeTab("home")}>Command Center</button>
@@ -387,6 +388,7 @@ export default function TimeCardApp() {
         <button className="classicSwitch" onClick={() => changeHomeMode("classic")}>Use classic Home Screen</button>
         <small className="homeReference">Rollback reference: classic-admin-tabs-v26</small>
       </div>}
+      </div>
       {error && <div className="alert">{error}</div>}
 
       {tab === "home" && isAdmin && homeMode === "beta" ? <CommandCenter data={data} onNavigate={changeTab} onUseClassic={() => changeHomeMode("classic")} /> :

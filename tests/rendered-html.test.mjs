@@ -96,6 +96,17 @@ test("keeps the classic admin screen as an easy beta rollback", async () => {
   assert.match(source, /localStorage\.setItem\(`\$\{BETA_HOME_STORAGE_PREFIX}/);
 });
 
+test("provides a desktop admin layout without changing the mobile navigation", async () => {
+  const appSource = await readFile(new URL("../app/TimeCardApp.tsx", import.meta.url), "utf8");
+  const cssSource = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+
+  assert.match(appSource, /className=\{isAdmin \? "adminNavArea" : "navArea"\}/);
+  assert.match(cssSource, /@media \(min-width:960px\)/);
+  assert.match(cssSource, /grid-template-columns:220px minmax\(0,1fr\)/);
+  assert.match(cssSource, /\.adminNavArea \.tabs \{ display:grid/);
+  assert.match(cssSource, /\.commandCenter \{ display:grid/);
+});
+
 test("gives employees a private downloadable pay history", async () => {
   const appSource = await readFile(new URL("../app/TimeCardApp.tsx", import.meta.url), "utf8");
   const apiSource = await readFile(new URL("../app/api/timecard/route.ts", import.meta.url), "utf8");
