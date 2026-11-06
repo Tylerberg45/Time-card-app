@@ -1,23 +1,34 @@
 import { detectJobMismatches } from "../../job-mismatch-logic.mjs";
+import { databaseAdapter, receiptAdapter } from "../../../db/railway.mjs";
 
 type Payload = Record<string, unknown>;
 type SessionUser = { id: number; name: string; role: "admin" | "employee" };
 type PushResult = { sent: boolean; id?: string };
 type PushButton = { id: string; text: string; url: string };
+type Statement = {
+  bind(...values: unknown[]): Statement;
+  first<T = Record<string, unknown>>(): Promise<T | null>;
+  all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
+  run(): Promise<{ meta: { changes: number } }>;
+};
+type RailwayDatabase = { prepare(sql: string): Statement; batch(statements: Statement[]): Promise<unknown> };
+type RailwayReceipts = {
+  get(key: string): Promise<{ body: BodyInit } | null>;
+  put(key: string, bytes: ArrayBuffer): Promise<void>;
+  delete(key: string): Promise<void>;
+};
 
-declare const __TIME_CARD_BUILD_ID__: string;
+const __TIME_CARD_BUILD_ID__ = process.env.RAILWAY_GIT_COMMIT_SHA || "railway-local";
 
 const COOKIE = "timecard_session";
 const encoder = new TextEncoder();
 
 function database() {
-  const db = (globalThis as typeof globalThis & { __TIME_CARD_DB?: D1Database }).__TIME_CARD_DB;
-  if (!db) throw new Error("The time card database is unavailable.");
-  return db;
+  return databaseAdapter as unknown as RailwayDatabase;
 }
 
 function receiptBucket() {
-  return (globalThis as typeof globalThis & { __TIME_CARD_BACKUPS?: R2Bucket }).__TIME_CARD_BACKUPS;
+  return receiptAdapter as unknown as RailwayReceipts;
 }
 
 function pushConfig() {
@@ -464,7 +475,7 @@ export async function GET(request: Request) {
       if (!object) return json({ error: "Receipt not found." }, 404);
       return new Response(object.body, {
         headers: {
-          "Content-Type": expense.receiptType || object.httpMetadata?.contentType || "image/jpeg",
+          "Content-Type": expense.receiptType || "image/jpeg",
           "Cache-Control": "private, no-store",
         },
       });
@@ -753,6 +764,7 @@ export async function POST(request: Request) {
     const now = new Date().toISOString();
 
     if (action === "setup") {
+      if (process.env.HAZEN_ALLOW_SETUP !== "1") return json({ error: "Administrator setup is disabled on this copy." }, 403);
       const count = await database().prepare(`SELECT COUNT(*) AS count FROM users WHERE role = 'admin'`).first<{ count: number }>();
       if (count?.count) return json({ error: "Administrator setup is already complete." }, 409);
       const name = String(body.name ?? "").trim();
@@ -839,7 +851,7 @@ export async function POST(request: Request) {
         const extension = (receiptFile.type.split("/")[1] || "jpg").replace(/[^a-z0-9]/gi, "").slice(0, 8) || "jpg";
         receiptKey = `receipts/${id || crypto.randomUUID()}.${extension}`;
         receiptType = receiptFile.type;
-        await receiptBucket()!.put(receiptKey, await receiptFile.arrayBuffer(), { httpMetadata: { contentType: receiptType } });
+        await receiptBucket().put(receiptKey, await receiptFile.arrayBuffer());
       }
       let savedId = id;
       if (id) {
